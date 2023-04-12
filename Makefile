@@ -993,10 +993,12 @@ export CC_FLAGS_SCS
 endif
 
 ifdef CONFIG_LTO_CLANG
+KBUILD_RUSTFLAGS_MODULE += -Clinker_plugin_lto
 ifdef CONFIG_LTO_CLANG_THIN
 CC_FLAGS_LTO	:= -flto=thin -fsplit-lto-unit
 else
-CC_FLAGS_LTO	:= -flto
+#CC_FLAGS_LTO	:= -flto
+KBUILD_CFLAGS_MODULE	+= -flto
 endif
 CC_FLAGS_LTO	+= -fvisibility=hidden
 

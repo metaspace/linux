@@ -70,6 +70,7 @@ endef
 
 vmlinux.o: $(initcalls-lds) vmlinux.a $(KBUILD_VMLINUX_LIBS) FORCE
 	$(call if_changed_rule,ld_vmlinux.o)
+	$(srctree)/scripts/redefine.py $@
 
 targets += vmlinux.o
 
