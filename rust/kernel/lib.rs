@@ -23,6 +23,8 @@
 //
 // Stable since Rust 1.80.0.
 #![feature(slice_flatten)]
+// Stable in Rust 1.80
+#![feature(non_null_convenience)]
 //
 // Stable since Rust 1.81.0.
 #![feature(lint_reasons)]

@@ -19,6 +19,9 @@ use crate::{
 };
 use core::{ffi::c_void, marker::PhantomData, ptr::NonNull};
 
+use crate::block::bio::Bio;
+use crate::block::bio::BioIterator;
+
 /// A wrapper around a blk-mq [`struct request`]. This represents an IO request.
 ///
 /// # Implementation details
@@ -90,6 +93,49 @@ impl<T: Operations> Request<T> {
             let this = unsafe { Request::aref_from_raw(ptr) };
             T::complete(this);
         }
+    }
+
+    /// Get a reference to the first [`Bio`] in this request.
+    #[inline(always)]
+    pub fn bio(&self) -> Option<&Bio> {
+        // SAFETY: By type invariant of `Self`, `self.0` is valid and the deref
+        // is safe.
+        let ptr = unsafe { (*self.0.get()).bio };
+        // SAFETY: By C API contract, if `bio` is not null it will have a
+        // positive refcount at least for the duration of the lifetime of
+        // `&self`.
+        unsafe { Bio::from_raw(ptr) }
+    }
+
+    /// Get a mutable reference to the first [`Bio`] in this request.
+    #[inline(always)]
+    pub fn bio_mut(&mut self) -> Option<&mut Bio> {
+        // SAFETY: By type invariant of `Self`, `self.0` is valid and the deref
+        // is safe.
+        let ptr = unsafe { (*self.0.get()).bio };
+        // SAFETY: By C API contract, if `bio` is not null it will have a
+        // positive refcount at least for the duration of the lifetime of
+        // `&self`.
+        unsafe { Bio::from_raw_mut(ptr) }
+    }
+
+    /// Get an iterator over all bio structurs in this request.
+    #[inline(always)]
+    pub fn bio_iter_mut<'a>(self: &'a mut Owned<Self>) -> BioIterator<'a> {
+        // INVARIANT: By C API contract, if the bio pointer is not null, it is a valid `struct bio`.
+        // `NonNull::new` will return `None` if the pointer is null.
+        BioIterator {
+            // SAFETY: By type invariant `self.0` is a valid `struct request`.
+            bio: NonNull::new(unsafe { (*self.0.get()).bio.cast() }),
+            _p: PhantomData,
+        }
+    }
+
+    /// Get the target sector for the request.
+    #[inline(always)]
+    pub fn sector(&self) -> usize {
+        // SAFETY: By type invariant of `Self`, `self.0` is valid and live.
+        unsafe { (*self.0.get()).__sector as usize }
     }
 
     /// Return a pointer to the [`RequestDataWrapper`] stored in the private area
