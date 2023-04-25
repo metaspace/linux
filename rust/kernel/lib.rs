@@ -19,6 +19,9 @@
 // Stable since Rust 1.79.0.
 #![feature(inline_const)]
 //
+// Stable in Rust 1.80
+#![feature(non_null_convenience)]
+//
 // Stable since Rust 1.81.0.
 #![feature(lint_reasons)]
 //
