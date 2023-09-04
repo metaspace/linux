@@ -30,6 +30,7 @@
 #include "kunit.c"
 #include "mm.c"
 #include "mutex.c"
+#include "num_cpus.c"
 #include "of.c"
 #include "page.c"
 #include "pci.c"
