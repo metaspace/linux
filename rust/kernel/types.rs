@@ -2,12 +2,14 @@
 
 //! Kernel types.
 
+use crate::alloc::KBox;
 use crate::ffi::c_void;
 use core::{
     cell::UnsafeCell,
     marker::{PhantomData, PhantomPinned},
     mem::MaybeUninit,
     ops::{Deref, DerefMut},
+    sync::atomic::{AtomicPtr, Ordering},
 };
 use pin_init::{PinInit, Wrapper, Zeroable};
 
@@ -453,3 +455,53 @@ pub type NotThreadSafe = PhantomData<*mut ()>;
 /// [`NotThreadSafe`]: type@NotThreadSafe
 #[allow(non_upper_case_globals)]
 pub const NotThreadSafe: NotThreadSafe = PhantomData;
+
+/// An optional atomic boxed value.
+pub struct AtomicOptionalBoxedPtr<T> {
+    ptr: AtomicPtr<T>,
+}
+
+impl<T> AtomicOptionalBoxedPtr<T> {
+    /// Creates a new instance with the given value.
+    pub fn new(value: Option<KBox<T>>) -> Self {
+        Self {
+            ptr: AtomicPtr::new(Self::to_ptr(value)),
+        }
+    }
+
+    fn to_ptr(value: Option<KBox<T>>) -> *mut T {
+        if let Some(v) = value {
+            KBox::into_raw(v)
+        } else {
+            core::ptr::null_mut()
+        }
+    }
+
+    /// Swaps the existing boxed value with the given one.
+    pub fn swap(&self, value: Option<KBox<T>>, order: Ordering) -> Option<KBox<T>> {
+        let ptr = self.ptr.swap(Self::to_ptr(value), order);
+        if ptr.is_null() {
+            return None;
+        }
+        // SAFETY: All non-null values that are stored come from `KBox::into_raw`. Additionally,
+        // they are always swapped by something else when read.
+        Some(unsafe { KBox::from_raw(ptr) })
+    }
+
+    /// Stores a new value. The previous value is dropped.
+    pub fn store(&self, value: Option<KBox<T>>, order: Ordering) {
+        self.swap(value, order);
+    }
+
+    /// Stores a new value and returns the old one.
+    pub fn take(&self, order: Ordering) -> Option<KBox<T>> {
+        self.swap(None, order)
+    }
+}
+
+impl<T> Drop for AtomicOptionalBoxedPtr<T> {
+    fn drop(&mut self) {
+        // Noone else has a reference to this object.
+        self.take(Ordering::Relaxed);
+    }
+}
