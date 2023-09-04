@@ -21,6 +21,7 @@
 #include "jump_label.c"
 #include "kunit.c"
 #include "mutex.c"
+#include "num_cpus.c"
 #include "page.c"
 #include "platform.c"
 #include "pci.c"
