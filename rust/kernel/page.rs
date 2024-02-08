@@ -83,6 +83,17 @@ impl Page {
         Opaque::raw_get(&self.page)
     }
 
+    /// Create a `&Page` from a raw `struct page` pointer
+    ///
+    /// # Safety
+    ///
+    /// `ptr` must be valid for use as a reference for the duration of `'a`.
+    pub unsafe fn from_raw<'a>(ptr: *mut bindings::page) -> &'a Self {
+            // SAFETY: By function safety requirements, ptr is not null and is
+            // valid for use as a reference.
+            unsafe { NonNull::new_unchecked(ptr).cast().as_ref() }
+    }
+
     /// Runs a piece of code with this page mapped to an address.
     ///
     /// The page is unmapped when this call returns.
