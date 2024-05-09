@@ -8,9 +8,14 @@ use crate::{
     bindings,
     block::mq::Operations,
     sync::Refcount,
+    time::{
+        hrtimer::{HasHrTimer, HrTimer, HrTimerCallback, HrTimerHandle, HrTimerPointer},
+        Ktime,
+    },
     types::{ARef, AlwaysRefCounted, Opaque, URef, UniqueRefCounted},
 };
 use core::{
+    ffi::c_void,
     marker::PhantomData,
     ptr::{addr_of_mut, NonNull},
     sync::atomic::Ordering,
@@ -74,7 +79,6 @@ impl<T: Operations> Request<T> {
         unsafe { ARef::from_raw(NonNull::new_unchecked(ptr as *const Self as *mut Self)) }
     }
 
-
     /// Complete the request by scheduling `Operations::complete` for
     /// execution.
     ///
@@ -88,7 +92,7 @@ impl<T: Operations> Request<T> {
         if !unsafe { bindings::blk_mq_complete_request_remote(ptr) } {
             // SAFETY: We released a refcount above that we can reclaim here.
             let this = unsafe { Request::aref_from_raw(ptr) };
-             T::complete(this);
+            T::complete(this);
         }
     }
 
@@ -180,6 +184,114 @@ unsafe impl<T: Operations> Send for Request<T> {}
 // SAFETY: Shared access is thread-safe for `Request`. `&self` methods that
 // mutate `self` are internally synchronized`
 unsafe impl<T: Operations> Sync for Request<T> {}
+
+/// A handle for a timer that is embedded in a [`Request`] private data area.
+pub struct RequestTimerHandle<T>
+where
+    T: Operations,
+    T::RequestData: HasHrTimer<T::RequestData>,
+{
+    inner: ARef<Request<T>>,
+}
+
+unsafe impl<T> HrTimerHandle for RequestTimerHandle<T>
+where
+    T: Operations,
+    T::RequestData: HasHrTimer<T::RequestData>,
+{
+    fn cancel(&mut self) -> bool {
+        let request_data_ptr = &self.inner.wrapper_ref().data as *const T::RequestData;
+
+        // SAFETY: As we obtained `self_ptr` from a valid reference above, it
+        // must point to a valid `U`.
+        let timer_ptr = unsafe {
+            <T::RequestData as HasHrTimer<T::RequestData>>::raw_get_timer(request_data_ptr)
+        };
+
+        // SAFETY: As `timer_ptr` points into `U` and `U` is valid, `timer_ptr`
+        // must point to a valid `HrTimer` instance.
+        unsafe { HrTimer::<T::RequestData>::raw_cancel(timer_ptr) }
+    }
+}
+
+impl<T> RequestTimerHandle<T>
+where
+    T: Operations,
+    T::RequestData: HasHrTimer<T::RequestData>,
+{
+    /// Drop the timer handle without cancelling the timer.
+    ///
+    /// This is safe because [`Request`] is not dropped during normal operations.
+    pub fn dismiss(mut self) {
+        unsafe { core::ptr::drop_in_place(&mut self.inner as *mut ARef<Request<T>>) };
+        core::mem::forget(self);
+    }
+}
+
+impl<T> Drop for RequestTimerHandle<T>
+where
+    T: Operations,
+    T::RequestData: HasHrTimer<T::RequestData>,
+{
+    fn drop(&mut self) {
+        self.cancel();
+    }
+}
+
+impl<T> HrTimerPointer for ARef<Request<T>>
+where
+    T: Operations,
+    T::RequestData: HasHrTimer<T::RequestData>,
+    T::RequestData: Sync,
+{
+    type TimerHandle = RequestTimerHandle<T>;
+
+    fn start(self, expires: Ktime) -> RequestTimerHandle<T> {
+        let pdu_ptr = self.data_ref() as *const T::RequestData;
+
+        unsafe { T::RequestData::start(pdu_ptr, expires) };
+
+        RequestTimerHandle { inner: self }
+    }
+}
+
+impl<T> kernel::time::hrtimer::RawHrTimerCallback for ARef<Request<T>>
+where
+    T: Operations,
+    T::RequestData: HasHrTimer<T::RequestData>,
+    T::RequestData: for<'a> HrTimerCallback<CallbackTarget<'a> = ARef<Request<T>>>,
+    T::RequestData: for<'a> HrTimerCallback<CallbackTargetParameter<'a> = ARef<Request<T>>>,
+    T::RequestData: Sync,
+{
+    unsafe extern "C" fn run(ptr: *mut bindings::hrtimer) -> bindings::hrtimer_restart {
+        // `HrTimer` is `repr(transparent)`
+        let timer_ptr = ptr.cast::<kernel::time::hrtimer::HrTimer<T::RequestData>>();
+
+        // SAFETY: By C API contract `ptr` is the pointer we passed when
+        // enqueing the timer, so it is a `HrTimer<T::RequestData>` embedded in a `T::RequestData`
+        let request_data_ptr = unsafe { T::RequestData::timer_container_of(timer_ptr) };
+
+        let offset = core::mem::offset_of!(RequestDataWrapper<T>, data);
+
+        // SAFETY: This sub stays withing the `bindings::request` allocation and does not wrap
+        let pdu_ptr = unsafe {
+            request_data_ptr
+                .cast::<u8>()
+                .sub(offset)
+                .cast::<RequestDataWrapper<T>>()
+        };
+
+        // SAFETY: This request pointer was passed to us by the kernel in `init_request_callback`.
+        let request_ptr = unsafe { bindings::blk_mq_rq_from_pdu(pdu_ptr.cast::<c_void>()) };
+
+        // SAFETY: By C API contract, we have ownership of the request.
+        let request_ref = unsafe { &*(request_ptr as *const Request<T>) };
+
+        let aref: ARef<Request<T>> = request_ref.into();
+
+        T::RequestData::run(aref).into()
+    }
+}
 
 // SAFETY: All instances of `Request<T>` are reference counted. This
 // implementation of `AlwaysRefCounted` ensure that increments to the ref count
