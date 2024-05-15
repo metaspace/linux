@@ -44,6 +44,10 @@ pub trait Operations: Sized {
     /// the `GenDisk` associated with this `Operations` implementation.
     type QueueData: ForeignOwnable;
 
+    /// Data associated with a dispatch queue. This is stored as a pointer in
+    /// the C `struct blk_mq_hw_ctx` that represents a hardware queue.
+    type HwData: ForeignOwnable;
+
     /// Data associated with a `TagSet`. This is stored as a pointer in `struct
     /// blk_mq_tag_set`.
     type TagSetData: ForeignOwnable;
@@ -54,20 +58,30 @@ pub trait Operations: Sized {
     /// Called by the kernel to queue a request with the driver. If `is_last` is
     /// `false`, the driver is allowed to defer committing the request.
     fn queue_rq(
+        hw_data: ForeignBorrowed<'_, Self::HwData>,
         queue_data: ForeignBorrowed<'_, Self::QueueData>,
         rq: Owned<Request<Self>>,
         is_last: bool,
     ) -> Result;
 
     /// Called by the kernel to indicate that queued requests should be submitted.
-    fn commit_rqs(queue_data: ForeignBorrowed<'_, Self::QueueData>);
+    fn commit_rqs(
+        hw_data: ForeignBorrowed<'_, Self::HwData>,
+        queue_data: ForeignBorrowed<'_, Self::QueueData>,
+    );
+
+    /// Called by the kernel to allocate and initialize a driver specific hardware context data.
+    fn init_hctx(
+        tagset_data: ForeignBorrowed<'_, Self::TagSetData>,
+        hctx_idx: u32,
+    ) -> Result<Self::HwData>;
 
     /// Called by the kernel when the request is completed.
     fn complete(rq: ARef<Request<Self>>);
 
     /// Called by the kernel to poll the device for completed requests. Only
     /// used for poll queues.
-    fn poll() -> bool {
+    fn poll(_hw_data: ForeignBorrowed<'_, Self::HwData>) -> bool {
         build_error!(crate::error::VTABLE_DEFAULT_ERROR)
     }
 }
@@ -127,6 +141,11 @@ impl<T: Operations> OperationsVTable<T> {
         let mut rq =
             unsafe { Owned::from_raw(NonNull::<Request<T>>::new_unchecked((*bd).rq.cast())) };
 
+        // SAFETY: The safety requirement for this function ensure that `hctx`
+        // is valid and that `driver_data` was produced by a call to
+        // `into_foreign` in `Self::init_hctx_callback`.
+        let hw_data = unsafe { T::HwData::borrow((*hctx).driver_data) };
+
         // SAFETY: `hctx` is valid as required by this function.
         let queue_data = unsafe { (*(*hctx).queue).queuedata };
 
@@ -140,6 +159,7 @@ impl<T: Operations> OperationsVTable<T> {
         unsafe { rq.start_unchecked() };
 
         let ret = T::queue_rq(
+            hw_data,
             queue_data,
             rq,
             // SAFETY: `bd` is valid as required by the safety requirement for
@@ -162,6 +182,10 @@ impl<T: Operations> OperationsVTable<T> {
     /// This function may only be called by blk-mq C infrastructure. The caller
     /// must ensure that `hctx` is valid.
     unsafe extern "C" fn commit_rqs_callback(hctx: *mut bindings::blk_mq_hw_ctx) {
+        // SAFETY: `driver_data` was installed by us in `init_hctx_callback` as
+        // the result of a call to `into_foreign`.
+        let hw_data = unsafe { T::HwData::borrow((*hctx).driver_data) };
+
         // SAFETY: `hctx` is valid as required by this function.
         let queue_data = unsafe { (*(*hctx).queue).queuedata };
 
@@ -170,7 +194,7 @@ impl<T: Operations> OperationsVTable<T> {
         // `ForeignOwnable::from_foreign()` is only called when the tagset is
         // dropped, which happens after we are dropped.
         let queue_data = unsafe { T::QueueData::borrow(queue_data) };
-        T::commit_rqs(queue_data)
+        T::commit_rqs(hw_data, queue_data)
     }
 
     /// This function is called by the C kernel. A pointer to this function is
@@ -194,29 +218,20 @@ impl<T: Operations> OperationsVTable<T> {
     ///
     /// # Safety
     ///
-    /// This function may only be called by blk-mq C infrastructure.
+    /// This function may only be called by blk-mq C infrastructure. `hctx` must
+    /// be a pointer to a valid and aligned `struct blk_mq_hw_ctx` that was
+    /// previously initialized by a call to `init_hctx_callback`.
     unsafe extern "C" fn poll_callback(
-        _hctx: *mut bindings::blk_mq_hw_ctx,
+        hctx: *mut bindings::blk_mq_hw_ctx,
         _iob: *mut bindings::io_comp_batch,
     ) -> crate::ffi::c_int {
-        T::poll().into()
+        // SAFETY: By function safety requirement, `hctx` was initialized by
+        // `init_hctx_callback` and thus `driver_data` came from a call to
+        // `into_foreign`.
+        let hw_data = unsafe { T::HwData::borrow((*hctx).driver_data) };
+        T::poll(hw_data).into()
     }
 
-    /// This function is called by the C kernel. A pointer to this function is
-    /// installed in the `blk_mq_ops` vtable for the driver.
-    ///
-    /// # Safety
-    ///
-    /// This function may only be called by blk-mq C infrastructure. This
-    /// function may only be called once before `exit_hctx_callback` is called
-    /// for the same context.
-    unsafe extern "C" fn init_hctx_callback(
-        _hctx: *mut bindings::blk_mq_hw_ctx,
-        _tagset_data: *mut crate::ffi::c_void,
-        _hctx_idx: crate::ffi::c_uint,
-    ) -> crate::ffi::c_int {
-        from_result(|| Ok(0))
-    }
 
     /// This function is called by the C kernel. A pointer to this function is
     /// installed in the `blk_mq_ops` vtable for the driver.
@@ -224,10 +239,49 @@ impl<T: Operations> OperationsVTable<T> {
     /// # Safety
     ///
     /// This function may only be called by blk-mq C infrastructure.
+    /// `tagset_data` must be initialized by the initializer returned by
+    /// `TagSet::try_new` as part of tag set initialization. `hctx` must be a
+    /// pointer to a valid `blk_mq_hw_ctx` where the `driver_data` field was not
+    /// yet initialized. This function may only be called onece before
+    /// `exit_hctx_callback` is called for the same context.
+    unsafe extern "C" fn init_hctx_callback(
+        hctx: *mut bindings::blk_mq_hw_ctx,
+        tagset_data: *mut core::ffi::c_void,
+        hctx_idx: crate::ffi::c_uint,
+    ) -> core::ffi::c_int {
+        from_result(|| {
+            // SAFETY: By the safety requirements of this function,
+            // `tagset_data` came from a call to `into_foreign` when the
+            // `TagSet` was initialized.
+            let tagset_data = unsafe { T::TagSetData::borrow(tagset_data) };
+            let data = T::init_hctx(tagset_data, hctx_idx)?;
+
+            // SAFETY: by the safety requirments of this function, `hctx` is
+            // valid for write
+            unsafe { (*hctx).driver_data = data.into_foreign() as _ };
+            Ok(0)
+        })
+    }
+
+    /// This function is called by the C kernel. A pointer to this function is
+    /// installed in the `blk_mq_ops` vtable for the driver.
+    ///
+    /// # Safety
+    ///
+    /// This function may only be called by blk-mq C infrastructure. `hctx` must
+    /// be a valid pointer that was previously initialized by a call to
+    /// `init_hctx_callback`. This function may be called only once after
+    /// `init_hctx_callback` was called.
     unsafe extern "C" fn exit_hctx_callback(
-        _hctx: *mut bindings::blk_mq_hw_ctx,
+        hctx: *mut bindings::blk_mq_hw_ctx,
         _hctx_idx: crate::ffi::c_uint,
     ) {
+        // SAFETY: By the safety requirements of this function, `hctx` is valid for read.
+        let ptr = unsafe { (*hctx).driver_data };
+
+        // SAFETY: By the safety requirements of this function, `ptr` came from
+        // a call to `into_foreign` in `init_hctx_callback`
+        unsafe { T::HwData::from_foreign(ptr) };
     }
 
     /// This function is called by the C kernel. A pointer to this function is
