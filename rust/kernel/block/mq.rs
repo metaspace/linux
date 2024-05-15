@@ -17,6 +17,12 @@
 //! - The [`GenDisk`] type that abstracts the C type `struct gendisk`.
 //! - The [`Request`] type that abstracts the C type `struct request`.
 //!
+//! Many of the C types that this module abstracts allow a driver to carry
+//! private data, either embedded in the struct directly, or as a C `void*`. In
+//! these abstractions, this data is typed. The types of the data is defined by
+//! associated types in `Operations`, see [`Operations::RequestData`] for an
+//! example.
+//!
 //! The kernel will interface with the block device driver by calling the method
 //! implementations of the `Operations` trait.
 //!
@@ -71,6 +77,7 @@
 //! impl Operations for MyBlkDevice {
 //!     type RequestData = ();
 //!     type QueueData = ();
+//!     type HwData = ();
 //!     type TagSetData = ();
 //!
 //!     fn new_request_data(
@@ -78,18 +85,25 @@
 //!         pin_init::zeroed::<()>()
 //!     }
 //!
-//!     fn queue_rq(_queue_data: (), rq: Owned<Request<Self>>, _is_last: bool) -> Result {
+//!     fn queue_rq(_hw_data: (),_queue_data: (), rq: Owned<Request<Self>>, _is_last: bool) -> Result {
 //!         rq.end_ok();
 //!         Ok(())
 //!     }
 //!
-//!     fn commit_rqs(_queue_data: ()) {}
+//!     fn commit_rqs(_hw_data: (), _queue_data: ()) {}
 //!
 //!     fn complete(rq: ARef<Request<Self>>) {
 //!         OwnableRefCounted::try_from_shared(rq)
 //!             .map_err(|_e| kernel::error::code::EIO)
 //!             .expect("Fatal error - expected to be able to end request")
 //!             .end_ok();
+//!     }
+//!
+//!     fn init_hctx(
+//!         _tagset_data: (),
+//!         _hctx_idx: u32,
+//!     ) -> Result<Self::HwData> {
+//!         Ok(())
 //!     }
 //! }
 //!

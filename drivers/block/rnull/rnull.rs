@@ -514,6 +514,7 @@ impl Operations for NullBlkDevice {
     type QueueData = Pin<KBox<QueueData>>;
     type RequestData = Pdu;
     type TagSetData = ();
+    type HwData = ();
 
     fn new_request_data() -> impl PinInit<Self::RequestData> {
         pin_init!(Pdu {
@@ -524,6 +525,7 @@ impl Operations for NullBlkDevice {
 
     #[inline(always)]
     fn queue_rq(
+        _hw_data: (),
         queue_data: Pin<&QueueData>,
         mut rq: Owned<mq::Request<Self>>,
         _is_last: bool,
@@ -564,7 +566,11 @@ impl Operations for NullBlkDevice {
         Ok(())
     }
 
-    fn commit_rqs(_queue_data: Pin<&QueueData>) {}
+    fn commit_rqs(_hw_data: (), _queue_data: Pin<&QueueData>) {}
+
+    fn init_hctx(_tagset_data: (), _hctx_idx: u32) -> Result {
+        Ok(())
+    }
 
     fn complete(rq: ARef<mq::Request<Self>>) {
         Self::end_request(
