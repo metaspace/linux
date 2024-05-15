@@ -96,12 +96,12 @@ impl<T: Operations> Request<T> {
     ///
     /// - `this` must point to a valid allocation of size at least size of
     ///   [`Self`] plus size of [`RequestDataWrapper`].
-    pub(crate) unsafe fn wrapper_ptr(this: *mut Self) -> NonNull<RequestDataWrapper> {
+    pub(crate) unsafe fn wrapper_ptr(this: *mut Self) -> NonNull<RequestDataWrapper<T>> {
         let request_ptr = this.cast::<bindings::request>();
         // SAFETY: By safety requirements for this function, `this` is a
         // valid allocation.
         let wrapper_ptr =
-            unsafe { bindings::blk_mq_rq_to_pdu(request_ptr).cast::<RequestDataWrapper>() };
+            unsafe { bindings::blk_mq_rq_to_pdu(request_ptr).cast::<RequestDataWrapper<T>>() };
         // SAFETY: By C API contract, `wrapper_ptr` points to a valid allocation
         // and is not null.
         unsafe { NonNull::new_unchecked(wrapper_ptr) }
@@ -109,7 +109,7 @@ impl<T: Operations> Request<T> {
 
     /// Return a reference to the [`RequestDataWrapper`] stored in the private
     /// area of the request structure.
-    pub(crate) fn wrapper_ref(&self) -> &RequestDataWrapper {
+    pub(crate) fn wrapper_ref(&self) -> &RequestDataWrapper<T> {
         // SAFETY: By type invariant, `self.0` is a valid allocation. Further,
         // the private data associated with this request is initialized and
         // valid. The existence of `&self` guarantees that the private data is
@@ -121,16 +121,19 @@ impl<T: Operations> Request<T> {
 /// A wrapper around data stored in the private area of the C [`struct request`].
 ///
 /// [`struct request`]: srctree/include/linux/blk-mq.h
-pub(crate) struct RequestDataWrapper {
+pub(crate) struct RequestDataWrapper<T: Operations> {
     /// The Rust request refcount has the following states:
     ///
     /// - 0: The request is owned by C block layer.
     /// - 1: The request is owned by Rust abstractions but there are no [`ARef`] references to it.
     /// - 2+: There are [`ARef`] references to the request.
     refcount: Refcount,
+
+    /// Driver managed request data
+    data: T::RequestData,
 }
 
-impl RequestDataWrapper {
+impl<T: Operations> RequestDataWrapper<T> {
     /// Return a reference to the refcount of the request that is embedding
     /// `self`.
     pub(crate) fn refcount(&self) -> &Refcount {
@@ -147,6 +150,17 @@ impl RequestDataWrapper {
         // SAFETY: Because of the safety requirements of this function, the
         // field projection is safe.
         unsafe { &raw mut (*this).refcount }
+    }
+
+    /// Return a pointer to the `data` field of the `Self` pointed to by `this`.
+    ///
+    /// # Safety
+    ///
+    /// - `this` must point to a live allocation of at least the size of `Self`.
+    pub(crate) unsafe fn data_ptr(this: *mut Self) -> *mut T::RequestData {
+        // SAFETY: Because of the safety requirements of this function, the
+        // field projection is safe.
+        unsafe { &raw mut (*this).data }
     }
 }
 
