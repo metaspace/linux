@@ -10,8 +10,8 @@ use crate::{
     bindings,
     block::mq::{operations::OperationsVTable, request::RequestDataWrapper, Operations},
     error::{self, Result},
-    prelude::try_pin_init,
-    types::Opaque,
+    try_pin_init,
+    types::{ForeignOwnable, Opaque},
 };
 use core::{convert::TryInto, marker::PhantomData};
 use pin_init::{pin_data, pinned_drop, PinInit};
@@ -38,6 +38,7 @@ impl<T: Operations> TagSet<T> {
     /// Try to create a new tag set
     pub fn new(
         nr_hw_queues: u32,
+        tagset_data: T::TagSetData,
         num_tags: u32,
         num_maps: u32,
         numa_node: i32,
@@ -57,7 +58,7 @@ impl<T: Operations> TagSet<T> {
                     queue_depth: num_tags,
                     cmd_size,
                     flags: flags.into_inner(),
-                    driver_data: core::ptr::null_mut::<crate::ffi::c_void>(),
+                    driver_data: tagset_data.into_foreign(),
                     nr_maps: num_maps,
                     ..tag_set
                 }
@@ -70,7 +71,12 @@ impl<T: Operations> TagSet<T> {
                 // SAFETY: we do not move out of `tag_set`.
                 let tag_set: &mut Opaque<_> = unsafe { Pin::get_unchecked_mut(tag_set) };
                 // SAFETY: `tag_set` is a reference to an initialized `blk_mq_tag_set`.
-                error::to_result( unsafe { bindings::blk_mq_alloc_tag_set(tag_set.get())})
+                let status = error::to_result( unsafe { bindings::blk_mq_alloc_tag_set(tag_set.get())});
+                if status.is_err() {
+                    // SAFETY: We created `driver_data` above with `into_foreign`
+                    unsafe { T::TagSetData::from_foreign((*tag_set.get()).driver_data) };
+                }
+                status
             }),
             _p: PhantomData,
         })
@@ -86,7 +92,14 @@ impl<T: Operations> TagSet<T> {
 impl<T: Operations> PinnedDrop for TagSet<T> {
     fn drop(self: Pin<&mut Self>) {
         // SAFETY: By type invariant `inner` is valid and has been properly
-        // initialized during construction.
+        // initialised during construction.
+        let tagset_data = unsafe { (*self.inner.get()).driver_data };
+
+        // SAFETY: `inner` is valid and has been properly initialised during construction.
         unsafe { bindings::blk_mq_free_tag_set(self.inner.get()) };
+
+        // SAFETY: `tagset_data` was created by a call to
+        // `ForeignOwnable::into_foreign` in `TagSet::try_new()`
+        unsafe { T::TagSetData::from_foreign(tagset_data) };
     }
 }
