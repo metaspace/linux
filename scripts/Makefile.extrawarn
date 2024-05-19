@@ -198,5 +198,6 @@ endif
 ifneq ($(findstring e, $(KBUILD_EXTRA_WARN)),)
 
 KBUILD_CFLAGS += -Werror
+rust_common_flags += -Dwarnings
 
 endif
