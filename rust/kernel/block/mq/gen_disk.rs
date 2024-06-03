@@ -368,6 +368,15 @@ impl<T: Operations> GenDisk<T> {
     pub fn tag_set(&self) -> &Arc<TagSet<T>> {
         &self.tag_set
     }
+
+    /// Call to tell the block layer the capacity of the device in sectors (512
+    /// bytes).
+    pub fn set_capacity_sectors(&self, sectors: u64) {
+        // SAFETY: By type invariant, `self.gendisk` points to a valid and
+        // initialized instance of `struct gendisk`. `set_capacity` takes a lock
+        // to synchronize this operation, so we will not race.
+        unsafe { bindings::set_capacity(self.gendisk, sectors) };
+    }
 }
 
 // SAFETY: `GenDisk` is an owned pointer to a `struct gendisk` and an `Arc` to a
