@@ -4,6 +4,7 @@
 
 mod configfs;
 
+use configfs::IRQMode;
 use kernel::{
     alloc::{flags, KVec},
     block::{
@@ -46,6 +47,10 @@ module! {
             default: 1,
             description: "Number of devices to register",
         },
+        irqmode: u8 {
+            default: 0,
+            description:  "IRQ completion handler. 0-none, 1-softirq",
+        },
     },
 }
 
@@ -71,6 +76,7 @@ impl kernel::InPlaceModule for NullBlkModule {
                     *module_parameters::bs.get(),
                     *module_parameters::rotational.get() != 0,
                     *module_parameters::gb.get() * 1024,
+                    (*module_parameters::irqmode.get()).try_into()?,
                 )?;
                 disks.push(disk, flags::GFP_KERNEL)?;
             }
@@ -93,29 +99,39 @@ impl NullBlkDevice {
         block_size: u32,
         rotational: bool,
         capacity_mib: u64,
+        irq_mode: IRQMode,
     ) -> Result<GenDisk<Self>> {
         let tagset = Arc::pin_init(TagSet::new(1, 256, 1), flags::GFP_KERNEL)?;
+
+        let queue_data = Box::new(QueueData { irq_mode }, flags::GFP_KERNEL)?;
 
         gen_disk::GenDiskBuilder::new()
             .capacity_sectors(capacity_mib << (20 - block::SECTOR_SHIFT))
             .logical_block_size(block_size)?
             .physical_block_size(block_size)?
             .rotational(rotational)
-            .build(fmt!("{}", name.to_str()?), tagset, ())
+            .build(fmt!("{}", name.to_str()?), tagset, queue_data)
     }
+}
+
+struct QueueData {
+    irq_mode: IRQMode,
 }
 
 #[vtable]
 impl Operations for NullBlkDevice {
-    type QueueData = ();
+    type QueueData = KBox<QueueData>;
 
     #[inline(always)]
-    fn queue_rq(_queue_data: (), rq: Owned<mq::Request<Self>>, _is_last: bool) -> Result {
-        rq.end_ok();
+    fn queue_rq(queue_data: &QueueData, rq: Owned<mq::Request<Self>>, _is_last: bool) -> Result {
+        match queue_data.irq_mode {
+            IRQMode::None => rq.end_ok(),
+            IRQMode::Soft => mq::Request::complete(rq.into()),
+        }
         Ok(())
     }
 
-    fn commit_rqs(_queue_data: ()) {}
+    fn commit_rqs(_queue_data: &QueueData) {}
 
     fn complete(rq: ARef<mq::Request<Self>>) {
         OwnableRefCounted::try_from_shared(rq)
