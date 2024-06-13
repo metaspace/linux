@@ -8,7 +8,7 @@ use crate::{
     bindings,
     block::{
         error::BlkResult,
-        mq::{gen_disk::GenDiskRef, request::RequestDataWrapper, IdleRequest, Request},
+        mq::{gen_disk::GenDiskRef, request::RequestDataWrapper, IdleRequest, Request, TagSet},
     },
     error::{from_result, to_result, Result},
     prelude::*,
@@ -100,6 +100,11 @@ pub trait Operations: Sized {
         _callback: impl Fn(&bindings::blk_zone, u32) -> Result,
     ) -> Result<u32> {
         Err(ENOTSUPP)
+    }
+
+    /// Called by the kernel to map submission queues to CPU cores.
+    fn map_queues(_tag_set: &TagSet<Self>) {
+        build_error!(crate::error::VTABLE_DEFAULT_ERROR)
     }
 }
 
@@ -394,6 +399,21 @@ impl<T: Operations> OperationsVTable<T> {
         })
     }
 
+    /// This function is called by the C kernel. A pointer to this function is
+    /// installed in the `blk_mq_ops` vtable for the driver.
+    ///
+    /// # Safety
+    ///
+    /// This function may only be called by blk-mq C infrastructure. `tag_set`
+    /// must be a pointer to a valid and initialized `TagSet<T>`. The pointee
+    /// must be valid for use as a reference at least the duration of this call.
+    unsafe extern "C" fn map_queues_callback(tag_set: *mut bindings::blk_mq_tag_set) {
+        // SAFETY: The safety requirements of this function satiesfies the
+        // requirements of `TagSet::from_ptr`.
+        let tag_set = unsafe { TagSet::from_ptr(tag_set) };
+        T::map_queues(tag_set);
+    }
+
     const VTABLE: bindings::blk_mq_ops = bindings::blk_mq_ops {
         queue_rq: Some(Self::queue_rq_callback),
         queue_rqs: None,
@@ -415,7 +435,11 @@ impl<T: Operations> OperationsVTable<T> {
         exit_request: Some(Self::exit_request_callback),
         cleanup_rq: None,
         busy: None,
-        map_queues: None,
+        map_queues: if T::HAS_MAP_QUEUES {
+            Some(Self::map_queues_callback)
+        } else {
+            None
+        },
         #[cfg(CONFIG_BLK_DEBUG_FS)]
         show_rq: None,
     };
