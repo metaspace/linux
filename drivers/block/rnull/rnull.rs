@@ -19,7 +19,7 @@ use kernel::{
     prelude::*,
     str::CString,
     sync::{Arc, Mutex},
-    types::URef,
+    types::{ARef, URef, UniqueRefCounted},
 };
 
 module! {
@@ -114,5 +114,12 @@ impl Operations for NullBlkDevice {
         Ok(())
     }
 
-    fn commit_rqs(_queue_data:()) {}
+    fn commit_rqs(_queue_data: ()) {}
+
+    fn complete(rq: ARef<mq::Request<Self>>) {
+        UniqueRefCounted::try_shared_to_unique(rq)
+            .map_err(|_e| kernel::error::code::EIO)
+            .expect("Failed to complete request")
+            .end_ok();
+    }
 }

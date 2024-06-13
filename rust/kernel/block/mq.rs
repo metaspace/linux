@@ -62,7 +62,7 @@
 //!     new_mutex,
 //!     prelude::*,
 //!     sync::{Arc, Mutex},
-//!     types::{URef, ForeignOwnable},
+//!     types::{ARef, URef, UniqueRefCounted, ForeignOwnable},
 //! };
 //!
 //! struct MyBlkDevice;
@@ -77,6 +77,13 @@
 //!     }
 //!
 //!     fn commit_rqs(_queue_data: ()) {}
+//!
+//!     fn complete(rq: ARef<Request<Self>>) {
+//!         UniqueRefCounted::try_shared_to_unique(rq)
+//!             .map_err(|_e| kernel::error::code::EIO)
+//!             .expect("Request was not uniqueue\n")
+//!             .end_ok();
+//!     }
 //! }
 //!
 //! let tagset: Arc<TagSet<MyBlkDevice>> =
