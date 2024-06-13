@@ -119,6 +119,11 @@ impl<T: Operations> Request<T> {
         // valid as a shared reference.
         unsafe { Self::wrapper_ptr(self as *const Self as *mut Self).as_ref() }
     }
+
+    /// Return a reference to the per-request data associated with this request.
+    pub fn data_ref(&self) -> &T::RequestData {
+        &self.wrapper_ref().data
+    }
 }
 
 /// A wrapper around data stored in the private area of the C [`struct request`].
