@@ -19,7 +19,7 @@ use kernel::{
     prelude::*,
     str::CString,
     sync::{Arc, Mutex},
-    types::Owned,
+    types::{ARef, OwnableRefCounted, Owned},
 };
 use pin_init::PinInit;
 
@@ -116,4 +116,11 @@ impl Operations for NullBlkDevice {
     }
 
     fn commit_rqs(_queue_data: ()) {}
+
+    fn complete(rq: ARef<mq::Request<Self>>) {
+        OwnableRefCounted::try_from_shared(rq)
+            .map_err(|_e| kernel::error::code::EIO)
+            .expect("Failed to complete request")
+            .end_ok();
+    }
 }
