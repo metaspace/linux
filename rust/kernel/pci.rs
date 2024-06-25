@@ -340,8 +340,9 @@ pub struct Device<Ctx: device::DeviceContext = device::Normal>(
 );
 
 impl<Ctx: device::DeviceContext> Device<Ctx> {
+    /// Get a raw pointer to this pci device.
     #[inline]
-    fn as_raw(&self) -> *mut bindings::pci_dev {
+    pub fn as_raw(&self) -> *mut bindings::pci_dev {
         self.0.get()
     }
 }
