@@ -1,0 +1,5 @@
+device = "rnullb0"
+module = "rnull_mod"
+module_args = [ "memory_backed=1", "param_memory_backed=1" ]
+modprobe = true
+module_reload_policy = "Always"

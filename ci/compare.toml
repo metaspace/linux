@@ -1,0 +1,28 @@
+plot = [
+  ["cnull", "rnull-1.78.0"],
+  ["cnull", "rnull-latest"],
+  ["cnull", "rnull-latest-lto"],
+]
+
+[[build_configs]]
+name = "cnull"
+kernel_config = "cnull"
+profile = ["cnull", "ci", "release"]
+
+[[build_configs]]
+name = "rnull-1.78.0"
+kernel_config = "rnull"
+latest_rustc = false
+profile = ["rnull", "ci", "release"]
+
+[[build_configs]]
+name = "rnull-latest"
+kernel_config = "rnull"
+latest_rustc = true
+profile = ["rnull", "ci", "release"]
+
+[[build_configs]]
+name = "rnull-latest-lto"
+kernel_config = "rnull-lto"
+latest_rustc = true
+profile = ["rnull", "ci", "release"]

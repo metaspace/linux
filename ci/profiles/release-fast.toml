@@ -1,0 +1,10 @@
+prep = false
+samples = 1
+runtime = 5
+ramp = 0
+cpufreq_governor_performance = true
+use_hugepages = true
+jobcounts = [ 1, 2, 6 ]
+workloads = [ "randread", "randwrite" ]
+block_sizes = [ "4KiB", "32KiB", "256KiB", "1MiB", "16MiB" ]
+queue_depths = [ 1, 8, 32, 128 ]
