@@ -1,0 +1,12 @@
+samples = 10
+runtime = 30
+ramp = 10
+cpufreq_governor_performance = true
+use_hugepages = true
+prep = false
+# Rust NVMe is buggy in multi threaded configs
+jobcounts = [ 1 ]
+hipri = true
+workloads = [ "randread" ]
+block_sizes = [ "4KiB", "32KiB", "256KiB", "1MiB"  ]
+queue_depths = [ 1, 8, 128 ]
