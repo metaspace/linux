@@ -1,0 +1,11 @@
+prep = true
+samples = 300
+runtime = 300
+ramp = 10
+cpufreq_governor_performance = true
+use_hugepages = true
+amd_pstate_fixed_3ghz = false
+jobcounts = [ 2 ]
+workloads = [ "randread" ]
+block_sizes = [ "256KiB" ]
+queue_depths = [ 8 ]
