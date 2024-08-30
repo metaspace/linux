@@ -1,0 +1,6 @@
+device = "nullb0"
+module = "null_blk"
+module_args = [ "nr_devices=0" ]
+modprobe = true
+configure_c_nullblk = true
+module_reload_policy = "Always"

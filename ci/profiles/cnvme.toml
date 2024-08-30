@@ -1,0 +1,5 @@
+device = "nvme0n1"
+module = "nvme"
+module_args = [ "poll_queues=1" ]
+modprobe = true
+module_reload_policy = "Once"
