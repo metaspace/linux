@@ -1,0 +1,9 @@
+samples = 1
+runtime = 10
+ramp = 0
+prep = false
+jobcounts = [ 1 ]
+workloads = [ "randrw" ]
+queue_depths = [ 1, 32 ]
+block_sizes = [ "4KiB" ]
+verify = false
