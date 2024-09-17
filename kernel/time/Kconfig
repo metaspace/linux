@@ -211,3 +211,10 @@ config CLOCKSOURCE_WATCHDOG_MAX_SKEW_US
 
 endmenu
 endif
+
+config RUST_HRTIMER
+	bool "Enable Rust hrtimer API"
+	depends on RUST
+	default y
+	help
+	  Build the Rust hrtimer abstractions.
