@@ -316,3 +316,6 @@ macro_rules! impl_has_hr_timer {
         }
     }
 }
+
+mod arc;
+pub use arc::ArcHrTimerHandle;
