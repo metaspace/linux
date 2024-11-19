@@ -208,7 +208,16 @@ impl Task {
     pub fn group_leader(&self) -> &Task {
         // SAFETY: The group leader of a task never changes after initialization, so reading this
         // field is not a data race.
-        let ptr = unsafe { *ptr::addr_of!((*self.as_ptr()).group_leader) };
+        let ptr = unsafe {
+            #[cfg(not(CONFIG_RANDSTRUCT))]
+            {
+                *ptr::addr_of!((*self.as_ptr()).group_leader)
+            }
+            #[cfg(CONFIG_RANDSTRUCT)]
+            {
+                *ptr::addr_of!((*self.as_ptr()).__bindgen_anon_1.group_leader)
+            }
+        };
 
         // SAFETY: The lifetime of the returned task reference is tied to the lifetime of `self`,
         // and given that a task has a reference to its group leader, we know it must be valid for
@@ -218,9 +227,16 @@ impl Task {
 
     /// Returns the PID of the given task.
     pub fn pid(&self) -> Pid {
-        // SAFETY: The pid of a task never changes after initialization, so reading this field is
-        // not a data race.
-        unsafe { *ptr::addr_of!((*self.as_ptr()).pid) }
+        unsafe {
+            #[cfg(not(CONFIG_RANDSTRUCT))]
+            {
+                *ptr::addr_of!((*self.as_ptr()).pid)
+            }
+            #[cfg(CONFIG_RANDSTRUCT)]
+            {
+                *ptr::addr_of!((*self.as_ptr()).__bindgen_anon_1.pid)
+            }
+        }
     }
 
     /// Returns the UID of the given task.
@@ -291,7 +307,16 @@ impl CurrentTask {
     pub fn mm(&self) -> Option<&MmWithUser> {
         // SAFETY: The `mm` field of `current` is not modified from other threads, so reading it is
         // not a data race.
-        let mm = unsafe { (*self.as_ptr()).mm };
+        let mm = unsafe {
+            #[cfg(not(CONFIG_RANDSTRUCT))]
+            {
+                (*self.as_ptr()).mm
+            }
+            #[cfg(CONFIG_RANDSTRUCT)]
+            {
+                (*self.as_ptr()).__bindgen_anon_1.mm
+            }
+        };
 
         if mm.is_null() {
             return None;
