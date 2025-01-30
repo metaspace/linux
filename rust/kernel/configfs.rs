@@ -127,8 +127,7 @@ pub unsafe trait HasGroup<Data> {
     ///
     /// # Safety
     ///
-    /// - `group` must point to the `bindings::config_group` that is embedded in
-    ///   `Self`.
+    /// - `group` must point to the `bindings::config_group` that is embedded in `Self`.
     unsafe fn container_of(group: *const bindings::config_group) -> *const Self;
 }
 
