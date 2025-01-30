@@ -1116,3 +1116,6 @@ pub mod parse_int {
     impl_parse_int!(isize);
     impl_parse_int!(usize);
 }
+
+mod buffer_writer;
+pub use buffer_writer::BufferWriter;
