@@ -402,3 +402,4 @@ macro_rules! impl_has_hr_timer {
 
 mod arc;
 mod pin;
+mod pin_mut;
