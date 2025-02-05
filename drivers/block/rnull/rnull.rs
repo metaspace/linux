@@ -5,7 +5,7 @@
 mod configfs;
 
 use kernel::{
-    alloc::flags,
+    alloc::{flags, KVec},
     block::{
         self,
         mq::{
@@ -15,9 +15,10 @@ use kernel::{
         },
     },
     error::Result,
-    pr_info,
+    new_mutex, pr_info,
     prelude::*,
-    sync::Arc,
+    str::CString,
+    sync::{Arc, Mutex},
     types::URef,
 };
 
@@ -27,20 +28,58 @@ module! {
     author: "Andreas Hindborg",
     description: "Rust implementation of the C null block driver",
     license: "GPL v2",
+    params: {
+        gb: u64 {
+            default: 4096,
+            description: "Device capacity in GiB",
+        },
+        rotational: u8 {
+            default: 0,
+            description: "Set the rotational feature for the device (0 for false, 1 for true). Default: 0",
+        },
+        bs: u32 {
+            default: 4096,
+            description: "Block size (in bytes)",
+        },
+        nr_devices: u64 {
+            default: 1,
+            description: "Number of devices to register",
+        },
+    },
 }
 
 #[pin_data]
 struct NullBlkModule {
     #[pin]
     configfs_subsystem: kernel::configfs::Subsystem<configfs::Config>,
+    #[pin]
+    param_disks: Mutex<KVec<GenDisk<NullBlkDevice>>>,
 }
 
 impl kernel::InPlaceModule for NullBlkModule {
     fn init(_module: &'static ThisModule) -> impl PinInit<Self, Error> {
         pr_info!("Rust null_blk loaded\n");
 
+        let mut disks = KVec::new();
+
+        let defer_init = move || -> Result<_, Error> {
+            for i in 0..(*module_parameters::nr_devices.get()) {
+                let name = CString::try_from_fmt(fmt!("rnullb{}", i))?;
+                let disk = NullBlkDevice::new(
+                    &name,
+                    *module_parameters::bs.get(),
+                    *module_parameters::rotational.get() != 0,
+                    *module_parameters::gb.get() * 1024,
+                )?;
+                disks.push(disk, flags::GFP_KERNEL)?;
+            }
+
+            Ok(disks)
+        };
+
         try_pin_init!(Self {
             configfs_subsystem <- configfs::subsystem(),
+            param_disks <- new_mutex!(defer_init()?),
         })
     }
 }
