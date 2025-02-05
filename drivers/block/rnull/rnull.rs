@@ -18,6 +18,8 @@ use kernel::{
     pr_info,
     prelude::*,
     sync::Arc,
+    time::hrtimer::{HrTimerCallback, HrTimerPointer, HrTimerRestart},
+    time::Delta,
     types::{ARef, OwnableRefCounted, Owned},
 };
 use pin_init::PinInit;
@@ -55,10 +57,17 @@ impl NullBlkDevice {
         rotational: bool,
         capacity_mib: u64,
         irq_mode: IRQMode,
+        completion_time: Delta,
     ) -> Result<GenDisk<Self>> {
         let tagset = Arc::pin_init(TagSet::new(1, 256, 1), GFP_KERNEL)?;
 
-        let queue_data = Box::new(QueueData { irq_mode }, GFP_KERNEL)?;
+        let queue_data = Box::new(
+            QueueData {
+                irq_mode,
+                completion_time,
+            },
+            GFP_KERNEL,
+        )?;
 
         gen_disk::GenDiskBuilder::new()
             .capacity_sectors(capacity_mib << (20 - block::SECTOR_SHIFT))
@@ -71,15 +80,43 @@ impl NullBlkDevice {
 
 struct QueueData {
     irq_mode: IRQMode,
+    completion_time: Delta,
+}
+
+#[pin_data]
+struct Pdu {
+    #[pin]
+    timer: kernel::time::hrtimer::HrTimer<Self>,
+}
+
+impl HrTimerCallback for Pdu {
+    type Pointer<'a> = ARef<mq::Request<NullBlkDevice>>;
+
+    fn run(this: Self::Pointer<'_>) -> HrTimerRestart {
+        OwnableRefCounted::try_from_shared(this)
+            .map_err(|_e| kernel::error::code::EIO)
+            .expect("Failed to complete request")
+            .end_ok();
+        HrTimerRestart::NoRestart
+    }
+}
+
+kernel::impl_has_hr_timer! {
+    impl HasHrTimer<Self> for Pdu {
+        mode: kernel::time::hrtimer::RelativeMode<kernel::time::Monotonic>,
+        field: self.timer,
+    }
 }
 
 #[vtable]
 impl Operations for NullBlkDevice {
     type QueueData = KBox<QueueData>;
-    type RequestData = ();
+    type RequestData = Pdu;
 
     fn new_request_data() -> impl PinInit<Self::RequestData> {
-        pin_init::zeroed::<Self::RequestData>()
+        pin_init!(Pdu {
+            timer <- kernel::time::hrtimer::HrTimer::new(),
+        })
     }
 
     #[inline(always)]
@@ -87,6 +124,11 @@ impl Operations for NullBlkDevice {
         match queue_data.irq_mode {
             IRQMode::None => rq.end_ok(),
             IRQMode::Soft => mq::Request::complete(rq.into()),
+            IRQMode::Timer => {
+                OwnableRefCounted::into_shared(rq)
+                    .start(queue_data.completion_time)
+                    .dismiss();
+            }
         }
         Ok(())
     }
