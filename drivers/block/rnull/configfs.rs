@@ -12,6 +12,7 @@ use kernel::{
     prelude::*,
     str::{kstrtobool_bytes, CString},
     sync::Mutex,
+    time,
 };
 use pin_init::PinInit;
 
@@ -37,7 +38,7 @@ impl AttributeOperations<0> for Config {
 
     fn show(_this: &Config, page: &mut [u8; PAGE_SIZE]) -> Result<usize> {
         let mut writer = kernel::str::Formatter::new(page);
-        writer.write_str("blocksize,size,rotational,irqmode\n")?;
+        writer.write_str("blocksize,size,rotational,irqmode,completion_nsec\n")?;
         Ok(writer.bytes_written())
     }
 }
@@ -60,6 +61,7 @@ impl configfs::GroupOperations for Config {
                 rotational: 2,
                 size: 3,
                 irqmode: 4,
+                completion_nsec: 5,
             ],
         };
 
@@ -75,6 +77,7 @@ impl configfs::GroupOperations for Config {
                     disk: None,
                     capacity_mib: 4096,
                     irq_mode: IRQMode::None,
+                    completion_time: time::Delta::ZERO,
                     name: name.try_into()?,
                 }),
             }),
@@ -86,6 +89,7 @@ impl configfs::GroupOperations for Config {
 pub(crate) enum IRQMode {
     None,
     Soft,
+    Timer,
 }
 
 impl TryFrom<u8> for IRQMode {
@@ -95,6 +99,7 @@ impl TryFrom<u8> for IRQMode {
         match value {
             0 => Ok(Self::None),
             1 => Ok(Self::Soft),
+            2 => Ok(Self::Timer),
             _ => Err(EINVAL),
         }
     }
@@ -105,6 +110,7 @@ impl fmt::Display for IRQMode {
         match self {
             Self::None => f.write_str("0")?,
             Self::Soft => f.write_str("1")?,
+            Self::Timer => f.write_str("2")?,
         }
         Ok(())
     }
@@ -124,6 +130,7 @@ struct DeviceConfigInner {
     rotational: bool,
     capacity_mib: u64,
     irq_mode: IRQMode,
+    completion_time: time::Delta,
     disk: Option<GenDisk<NullBlkDevice>>,
 }
 
@@ -154,6 +161,7 @@ impl configfs::AttributeOperations<0> for DeviceConfig {
                 guard.rotational,
                 guard.capacity_mib,
                 guard.irq_mode,
+                guard.completion_time,
             )?);
             guard.powered = true;
         } else if guard.powered && !power_op {
@@ -258,6 +266,33 @@ impl configfs::AttributeOperations<4> for DeviceConfig {
         let value = text.parse::<u8>().map_err(|_| EINVAL)?;
 
         this.data.lock().irq_mode = IRQMode::try_from(value)?;
+        Ok(())
+    }
+}
+
+#[vtable]
+impl configfs::AttributeOperations<5> for DeviceConfig {
+    type Data = DeviceConfig;
+
+    fn show(this: &DeviceConfig, page: &mut [u8; PAGE_SIZE]) -> Result<usize> {
+        let mut writer = kernel::str::Formatter::new(page);
+        writer.write_fmt(fmt!("{}\n", this.data.lock().completion_time.as_nanos()))?;
+        Ok(writer.bytes_written())
+    }
+
+    fn store(this: &DeviceConfig, page: &[u8]) -> Result {
+        if this.data.lock().powered {
+            return Err(EBUSY);
+        }
+
+        let text = core::str::from_utf8(page)?.trim();
+        let value = text
+            .parse::<u64>()
+            .map_err(|_| kernel::error::code::EINVAL)?;
+
+        let completion_time: i64 = value.try_into()?;
+
+        this.data.lock().completion_time = time::Delta::from_nanos(completion_time);
         Ok(())
     }
 }
