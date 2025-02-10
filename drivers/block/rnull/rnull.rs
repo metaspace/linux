@@ -80,6 +80,10 @@ module! {
             default: 0,
             description: "Create a memory-backed block device. 0-false, 1-true. Default: 0",
         },
+        submit_queues: u32 {
+            default: 1,
+            description: "Number of submission queues",
+        },
     },
 }
 
@@ -102,15 +106,16 @@ impl kernel::InPlaceModule for NullBlkModule {
             for i in 0..(*module_parameters::nr_devices.value()) {
                 let name = CString::try_from_fmt(fmt!("rnullb{}", i))?;
 
-                let disk = NullBlkDevice::new(
-                    &name,
-                    *module_parameters::bs.value(),
-                    *module_parameters::rotational.value() != 0,
-                    *module_parameters::gb.value() * 1024,
-                    (*module_parameters::irqmode.value()).try_into()?,
-                    Delta::from_nanos(completion_time),
-                    *module_parameters::memory_backed.value() != 0,
-                )?;
+                let disk = NullBlkDevice::new(NullBlkOptions {
+                    name: &name,
+                    block_size: *module_parameters::bs.value(),
+                    rotational: *module_parameters::rotational.value() != 0,
+                    capacity_mib: *module_parameters::gb.value() * 1024,
+                    irq_mode: (*module_parameters::irqmode.value()).try_into()?,
+                    completion_time: Delta::from_nanos(completion_time),
+                    memory_backed: *module_parameters::memory_backed.value() != 0,
+                    submit_queues: *module_parameters::submit_queues.value(),
+                })?;
                 disks.push(disk, GFP_KERNEL)?;
             }
 
@@ -124,25 +129,38 @@ impl kernel::InPlaceModule for NullBlkModule {
     }
 }
 
+struct NullBlkOptions<'a> {
+    name: &'a CStr,
+    block_size: u32,
+    rotational: bool,
+    capacity_mib: u64,
+    irq_mode: IRQMode,
+    completion_time: Delta,
+    memory_backed: bool,
+    submit_queues: u32,
+}
 struct NullBlkDevice;
 
 impl NullBlkDevice {
-    fn new(
-        name: &CStr,
-        block_size: u32,
-        rotational: bool,
-        capacity_mib: u64,
-        irq_mode: IRQMode,
-        completion_time: Delta,
-        memory_backed: bool,
-    ) -> Result<GenDisk<Self>> {
+    fn new(options: NullBlkOptions<'_>) -> Result<GenDisk<Self>> {
+        let NullBlkOptions {
+            name,
+            block_size,
+            rotational,
+            capacity_mib,
+            irq_mode,
+            completion_time,
+            memory_backed,
+            submit_queues,
+        } = options;
+
         let flags = if memory_backed {
             mq::tag_set::Flag::Blocking.into()
         } else {
             mq::tag_set::Flags::default()
         };
 
-        let tagset = Arc::pin_init(TagSet::new(1, 256, 1, flags), GFP_KERNEL)?;
+        let tagset = Arc::pin_init(TagSet::new(submit_queues, 256, 1, flags), GFP_KERNEL)?;
 
         let queue_data = Box::pin_init(
             pin_init!(QueueData {
