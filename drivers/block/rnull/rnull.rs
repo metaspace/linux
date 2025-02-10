@@ -69,6 +69,10 @@ module! {
             default: 0,
             description: "Create a memory-backed block device. 0-false, 1-true. Default: 0",
         },
+        submit_queues: u32 {
+            default: 1,
+            description: "Number of submission queues",
+        },
     },
 }
 
@@ -98,6 +102,7 @@ impl kernel::InPlaceModule for NullBlkModule {
                     (*module_parameters::irqmode.get()).try_into()?,
                     Ktime::from_nanos(completion_time),
                     *module_parameters::memory_backed.get() != 0,
+                    *module_parameters::submit_queues.get(),
                 )?;
                 disks.push(disk, flags::GFP_KERNEL)?;
             }
@@ -123,8 +128,9 @@ impl NullBlkDevice {
         irq_mode: IRQMode,
         completion_time: Ktime,
         memory_backed: bool,
+        submit_queues: u32,
     ) -> Result<GenDisk<Self>> {
-        let tagset = Arc::pin_init(TagSet::new(1, 256, 1), flags::GFP_KERNEL)?;
+        let tagset = Arc::pin_init(TagSet::new(submit_queues, 256, 1), flags::GFP_KERNEL)?;
 
         let queue_data = Box::pin_init(
             pin_init!(
