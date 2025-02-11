@@ -18,10 +18,11 @@ use kernel::{
         },
     },
     error::Result,
-    new_spinlock,
+    new_mutex, new_spinlock,
     page::Page,
     prelude::*,
-    sync::{aref::ARef, Arc, SpinLock},
+    str::CString,
+    sync::{aref::ARef, Arc, Mutex, SpinLock},
     time::{
         hrtimer::{HrTimerCallback, HrTimerCallbackContext, HrTimerPointer, HrTimerRestart},
         Delta,
@@ -38,20 +39,90 @@ module! {
     authors: ["Andreas Hindborg"],
     description: "Rust implementation of the C null block driver",
     license: "GPL v2",
+    params: {
+        gb: u64 {
+            default: 4,
+            description: "Device capacity in GiB",
+        },
+        rotational: u8 {
+            default: 0,
+            description: "Set the rotational feature for the device (0 for false, 1 for true). Default: 0",
+        },
+        bs: u32 {
+            default: 4096,
+            description: "Block size (in bytes)",
+        },
+        nr_devices: u64 {
+            default: 1,
+            description: "Number of devices to register",
+        },
+        irqmode: u8 {
+            default: 0,
+            description:  "IRQ completion handler. 0-none, 1-softirq, 2-timer",
+        },
+        completion_nsec: u64 {
+            default: 10_000,
+            description:  "Time in ns to complete a request in hardware. Default: 10,000ns",
+        },
+        memory_backed: u8 {
+            default: 0,
+            description: "Create a memory-backed block device. 0-false, 1-true. Default: 0",
+        },
+        submit_queues: u32 {
+            default: 1,
+            description: "Number of submission queues",
+        },
+        use_per_node_hctx: u8 {
+            default: 0,
+            description:  "Use per-node allocation for hardware context queues, 0-false, 1-true. Default: 0-false",
+        },
+    },
 }
 
 #[pin_data]
 struct NullBlkModule {
     #[pin]
     configfs_subsystem: kernel::configfs::Subsystem<configfs::Config>,
+    #[pin]
+    param_disks: Mutex<KVec<GenDisk<NullBlkDevice>>>,
 }
 
 impl kernel::InPlaceModule for NullBlkModule {
     fn init(_module: &'static ThisModule) -> impl PinInit<Self, Error> {
         pr_info!("Rust null_blk loaded\n");
 
+        let mut disks = KVec::new();
+
+        let defer_init = move || -> Result<_, Error> {
+            let completion_time: i64 = (*module_parameters::completion_nsec.value()).try_into()?;
+            for i in 0..(*module_parameters::nr_devices.value()) {
+                let name = CString::try_from_fmt(fmt!("rnullb{}", i))?;
+
+                let submit_queues = if *module_parameters::use_per_node_hctx.value() != 0 {
+                    kernel::num_online_nodes()
+                } else {
+                    *module_parameters::submit_queues.value()
+                };
+
+                let disk = NullBlkDevice::new(
+                    &name,
+                    *module_parameters::bs.value(),
+                    *module_parameters::rotational.value() != 0,
+                    *module_parameters::gb.value() * 1024,
+                    (*module_parameters::irqmode.value()).try_into()?,
+                    Delta::from_nanos(completion_time),
+                    *module_parameters::memory_backed.value() != 0,
+                    submit_queues,
+                )?;
+                disks.push(disk, GFP_KERNEL)?;
+            }
+
+            Ok(disks)
+        };
+
         try_pin_init!(Self {
             configfs_subsystem <- configfs::subsystem(),
+            param_disks <- new_mutex!(defer_init()?),
         })
     }
 }
