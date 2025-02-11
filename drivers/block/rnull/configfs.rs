@@ -1,6 +1,7 @@
 use super::{NullBlkDevice, THIS_MODULE};
 use core::fmt::{Display, Write};
 use kernel::{
+    bindings,
     block::mq::gen_disk::{GenDisk, GenDiskBuilder},
     c_str,
     configfs::{self, AttributeOperations},
@@ -65,6 +66,7 @@ impl configfs::GroupOperations for Config {
                 memory_backed: 6,
                 submit_queues: 7,
                 use_per_node_hctx: 8,
+                home_node: 9,
             ],
         };
 
@@ -84,6 +86,7 @@ impl configfs::GroupOperations for Config {
                     name: name.try_into()?,
                     memory_backed: false,
                     submit_queues: 1,
+                    home_node: bindings::NUMA_NO_NODE,
                 }),
             }),
         ))
@@ -139,6 +142,7 @@ struct DeviceConfigInner {
     disk: Option<GenDisk<NullBlkDevice>>,
     memory_backed: bool,
     submit_queues: u32,
+    home_node: i32,
 }
 
 #[vtable]
@@ -176,6 +180,7 @@ impl configfs::AttributeOperations<0> for DeviceConfig {
                 guard.completion_time,
                 guard.memory_backed,
                 guard.submit_queues,
+                guard.home_node,
             )?);
             guard.powered = true;
         } else if guard.powered && !power_op {
@@ -412,6 +417,35 @@ impl configfs::AttributeOperations<8> for DeviceConfig {
             this.data.lock().submit_queues *= kernel::num_online_nodes();
         }
 
+        Ok(())
+    }
+}
+
+#[vtable]
+impl configfs::AttributeOperations<9> for DeviceConfig {
+    type Data = DeviceConfig;
+
+    fn show(this: &DeviceConfig, page: &mut [u8; PAGE_SIZE]) -> Result<usize> {
+        let mut writer = kernel::str::BufferWriter::new(page)?;
+        writer.write_fmt(fmt!("{}\n", this.data.lock().home_node))?;
+        Ok(writer.pos())
+    }
+
+    fn store(this: &DeviceConfig, page: &[u8]) -> Result {
+        if this.data.lock().powered {
+            return Err(EBUSY);
+        }
+
+        let text = core::str::from_utf8(page)?.trim();
+        let value = text
+            .parse::<i32>()
+            .map_err(|_| kernel::error::code::EINVAL)?;
+
+        if value == 0 || value >= kernel::num_online_nodes().try_into()? {
+            return Err(kernel::error::code::EINVAL);
+        }
+
+        this.data.lock().home_node = value;
         Ok(())
     }
 }
