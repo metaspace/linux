@@ -141,7 +141,10 @@ impl NullBlkDevice {
         memory_backed: bool,
         submit_queues: u32,
     ) -> Result<GenDisk<Self>> {
-        let tagset = Arc::pin_init(TagSet::new(submit_queues, 256, 1), flags::GFP_KERNEL)?;
+        let tagset = Arc::pin_init(
+            TagSet::new(submit_queues, 256, 1, bindings::NUMA_NO_NODE),
+            flags::GFP_KERNEL,
+        )?;
 
         let queue_data = Box::pin_init(
             pin_init!(
