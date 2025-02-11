@@ -73,6 +73,10 @@ module! {
             default: 1,
             description: "Number of submission queues",
         },
+        use_per_node_hctx: u8 {
+            default: 0,
+            description:  "Use per-node allocation for hardware context queues, 0-false, 1-true. Default: 0-false",
+        },
     },
 }
 
@@ -94,6 +98,13 @@ impl kernel::InPlaceModule for NullBlkModule {
             let completion_time: i64 = (*module_parameters::completion_nsec.get()).try_into()?;
             for i in 0..(*module_parameters::nr_devices.get()) {
                 let name = CString::try_from_fmt(fmt!("rnullb{}", i))?;
+
+                let submit_queues = if *module_parameters::use_per_node_hctx.get() != 0 {
+                    kernel::num_online_nodes()
+                } else {
+                    *module_parameters::submit_queues.get()
+                };
+
                 let disk = NullBlkDevice::new(
                     &name,
                     *module_parameters::bs.get(),
@@ -102,7 +113,7 @@ impl kernel::InPlaceModule for NullBlkModule {
                     (*module_parameters::irqmode.get()).try_into()?,
                     Ktime::from_nanos(completion_time),
                     *module_parameters::memory_backed.get() != 0,
-                    *module_parameters::submit_queues.get(),
+                    submit_queues,
                 )?;
                 disks.push(disk, flags::GFP_KERNEL)?;
             }
