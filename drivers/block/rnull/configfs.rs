@@ -5,6 +5,7 @@ use super::{
     THIS_MODULE, //
 };
 use kernel::{
+    bindings,
     block::mq::gen_disk::{
         GenDisk,
         GenDiskBuilder, //
@@ -92,6 +93,7 @@ impl configfs::GroupOperations for Config {
                 memory_backed: 6,
                 submit_queues: 7,
                 use_per_node_hctx: 8,
+                home_node: 9,
             ],
         };
 
@@ -111,6 +113,7 @@ impl configfs::GroupOperations for Config {
                     name: name.try_into()?,
                     memory_backed: false,
                     submit_queues: 1,
+                    home_node: bindings::NUMA_NO_NODE,
                 }),
             }),
             core::iter::empty(),
@@ -167,6 +170,7 @@ struct DeviceConfigInner {
     disk: Option<GenDisk<NullBlkDevice>>,
     memory_backed: bool,
     submit_queues: u32,
+    home_node: i32,
 }
 
 #[vtable]
@@ -199,6 +203,7 @@ impl configfs::AttributeOperations<0> for DeviceConfig {
                 completion_time: guard.completion_time,
                 memory_backed: guard.memory_backed,
                 submit_queues: guard.submit_queues,
+                home_node: guard.home_node,
             })?);
             guard.powered = true;
         } else if guard.powered && !power_op {
@@ -301,4 +306,18 @@ configfs_attribute!(DeviceConfig, 8,
         }
         Ok(())
     })
+);
+
+configfs_simple_field!(
+    DeviceConfig,
+    9,
+    home_node,
+    i32,
+    check | value | {
+        if value == 0 || value >= kernel::num_online_nodes().try_into()? {
+            Err(kernel::error::code::EINVAL)
+        } else {
+            Ok(())
+        }
+    }
 );
