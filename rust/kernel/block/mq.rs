@@ -58,6 +58,7 @@
 //! ```rust
 //! use kernel::{
 //!     alloc::flags,
+//!     bindings,
 //!     block::mq::*,
 //!     new_mutex,
 //!     prelude::*,
@@ -93,7 +94,7 @@
 //! }
 //!
 //! let tagset: Arc<TagSet<MyBlkDevice>> =
-//!     Arc::pin_init(TagSet::new(1, 256, 1), flags::GFP_KERNEL)?;
+//!     Arc::pin_init(TagSet::new(1, 256, 1, bindings::NUMA_NO_NODE), flags::GFP_KERNEL)?;
 //! let mut disk = gen_disk::GenDiskBuilder::new()
 //!     .capacity_sectors(4096)
 //!     .build(format_args!("myblk"), tagset, ())?;
