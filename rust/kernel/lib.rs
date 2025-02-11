@@ -349,3 +349,11 @@ pub fn num_possible_cpus() -> u32 {
     // SAFETY: FFI call with no additional requirements.
     unsafe { bindings::num_possible_cpus() }
 }
+
+/// Returns the number of online numa nodes.
+pub fn num_online_nodes() -> u32 {
+    // SAFETY: When numa is enabled, this is a global mutable static. We do as C and just read it,
+    // even though it might race.
+    #[allow(unused_unsafe)]
+    unsafe { bindings::nr_online_nodes }
+}
