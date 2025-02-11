@@ -40,6 +40,7 @@ impl<T: Operations> TagSet<T> {
         nr_hw_queues: u32,
         num_tags: u32,
         num_maps: u32,
+        numa_node: i32,
         flags: Flags,
     ) -> impl PinInit<Self, error::Error> {
         // SAFETY: `blk_mq_tag_set` only contains integers and pointers, which
@@ -52,7 +53,7 @@ impl<T: Operations> TagSet<T> {
                     ops: OperationsVTable::<T>::build(),
                     nr_hw_queues,
                     timeout: 0, // 0 means default which is 30Hz in C
-                    numa_node: bindings::NUMA_NO_NODE,
+                    numa_node,
                     queue_depth: num_tags,
                     cmd_size,
                     flags: flags.into_inner(),
