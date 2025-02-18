@@ -231,7 +231,7 @@ unsafe extern "C" fn fops_open<T: MiscDevice>(
     // fops_* methods in this file, which all correctly cast the private data to the new type.
     //
     // SAFETY: The open call of a file can access the private data.
-    unsafe { (*raw_file).private_data = ptr.into_foreign() };
+    unsafe { (*raw_file).private_data = ptr.into_foreign().cast() };
 
     0
 }
@@ -245,7 +245,7 @@ unsafe extern "C" fn fops_release<T: MiscDevice>(
     file: *mut bindings::file,
 ) -> c_int {
     // SAFETY: The release call of a file owns the private data.
-    let private = unsafe { (*file).private_data };
+    let private = unsafe { (*file).private_data }.cast();
     // SAFETY: The release call of a file owns the private data.
     let ptr = unsafe { <T::Ptr as ForeignOwnable>::from_foreign(private) };
 
@@ -266,7 +266,7 @@ unsafe extern "C" fn fops_ioctl<T: MiscDevice>(
     arg: c_ulong,
 ) -> c_long {
     // SAFETY: The ioctl call of a file can access the private data.
-    let private = unsafe { (*file).private_data };
+    let private = unsafe { (*file).private_data }.cast();
     // SAFETY: Ioctl calls can borrow the private data of the file.
     let device = unsafe { <T::Ptr as ForeignOwnable>::borrow(private) };
 
@@ -291,7 +291,7 @@ unsafe extern "C" fn fops_compat_ioctl<T: MiscDevice>(
     arg: c_ulong,
 ) -> c_long {
     // SAFETY: The compat ioctl call of a file can access the private data.
-    let private = unsafe { (*file).private_data };
+    let private = unsafe { (*file).private_data }.cast();
     // SAFETY: Ioctl calls can borrow the private data of the file.
     let device = unsafe { <T::Ptr as ForeignOwnable>::borrow(private) };
 
@@ -315,7 +315,7 @@ unsafe extern "C" fn fops_show_fdinfo<T: MiscDevice>(
     file: *mut bindings::file,
 ) {
     // SAFETY: The release call of a file owns the private data.
-    let private = unsafe { (*file).private_data };
+    let private = unsafe { (*file).private_data }.cast();
     // SAFETY: Ioctl calls can borrow the private data of the file.
     let device = unsafe { <T::Ptr as ForeignOwnable>::borrow(private) };
     // SAFETY:
