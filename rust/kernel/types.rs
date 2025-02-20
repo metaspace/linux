@@ -622,6 +622,7 @@ impl<T: UniqueRefCounted> URef<T> {
     ///
     /// # Safety
     ///
+    /// TODO: Should not put constraints on refcount here.
     /// Callers must ensure that the reference count is exactly one, and that they
     /// are properly relinquishing this one increment. Callers
     /// must not use the underlying object anymore -- it is only safe to do so via the newly
