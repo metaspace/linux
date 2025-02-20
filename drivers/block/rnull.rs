@@ -21,7 +21,7 @@ use kernel::{
     new_mutex, pr_info,
     prelude::*,
     sync::{Arc, Mutex},
-    types::ARef,
+    types::URef,
 };
 
 module! {
@@ -65,14 +65,8 @@ struct NullBlkDevice;
 #[vtable]
 impl Operations for NullBlkDevice {
     #[inline(always)]
-    fn queue_rq(rq: ARef<mq::Request<Self>>, _is_last: bool) -> Result {
-        mq::Request::end_ok(rq)
-            .map_err(|_e| kernel::error::code::EIO)
-            // We take no refcounts on the request, so we expect to be able to
-            // end the request. The request reference must be unique at this
-            // point, and so `end_ok` cannot fail.
-            .expect("Fatal error - expected to be able to end request");
-
+    fn queue_rq(rq: URef<mq::Request<Self>>, _is_last: bool) -> Result {
+        rq.end_ok();
         Ok(())
     }
 
