@@ -12,10 +12,7 @@ use crate::{
     sync::Refcount,
     types::URef,
 };
-use core::{
-    marker::PhantomData,
-    ptr::NonNull,
-};
+use core::{marker::PhantomData, ptr::NonNull};
 
 /// Implement this trait to interface blk-mq as block devices.
 ///
@@ -80,11 +77,17 @@ impl<T: Operations> OperationsVTable<T> {
         // this function.
         let request = unsafe { &*(*bd).rq.cast::<Request<T>>() };
 
-        // One refcount for the ARef, one for being in flight
-        request.wrapper_ref().refcount().set(2);
+        debug_assert!(
+            request
+                .wrapper_ref()
+                .refcount()
+                .as_atomic()
+                .load(core::sync::atomic::Ordering::Relaxed)
+                == 0
+        );
 
         // SAFETY:
-        //  - We own a refcount that we took above. We pass that to `ARef`.
+        //  - By API contract, we own the request.
         //  - By the safety requirements of this function, `request` is a valid
         //    `struct request` and the private data is properly initialized.
         //  - `rq` will be alive until `blk_mq_end_request` is called and is

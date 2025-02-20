@@ -20,22 +20,20 @@ use core::{
 ///
 /// # Implementation details
 ///
-/// There are four states for a request that the Rust bindings care about:
+/// There are tree states for a request that the Rust bindings care about:
 ///
-/// 1. Request is owned by block layer (refcount 0).
+/// 1. Request is owned by block layer (refcount 0) or a [`URef`] is referencing the request.
 /// 2. Request is owned by driver but with no [`ARef`] or [`URef`] referencing
 ///    the request (refcount 1).
 /// 3. Request is owned by driver with exactly one [`URef`] referencing the request
-///    (refcount 2).
-/// 4. Request is owned by driver with one or more [`ARef`] instances
-///    referencing the request (refcount >= 3).
+///    (refcount >= 2).
 ///
+/// We need to track 1 and 2 to make sure that `tag_to_rq` does not issue any
+/// [`ARef`] to requests not owned by the driver, or to requests that have a
+/// [`URef`] referencing it.
 ///
-/// We need to track 1 and 2 to ensure we fail tag to request conversions for
-/// requests that are not owned by the driver.
-///
-/// We need to track 3 and 4 to ensure that it is safe to end the request and hand
-/// back ownership to the block layer.
+/// We need to track 3 to know when it is safe to convert an [`ARef`] to a
+/// [`URef`].
 ///
 /// Note that driver can still obtain new `ARef` even if there is no `ARef`s in existence by using
 /// `tag_to_rq`, hence the need to distinct B and C.
@@ -65,6 +63,7 @@ impl<T: Operations> Request<T> {
     ///
     /// * The caller must own a refcount on `ptr` that is transferred to the
     ///   returned [`ARef`].
+    /// * The refcount must be >= 2.
     /// * The type invariants for [`Request`] must hold for the pointee of `ptr`.
     ///
     /// [`struct request`]: srctree/include/linux/blk-mq.h
@@ -111,9 +110,9 @@ impl<T: Operations> Request<T> {
 pub(crate) struct RequestDataWrapper {
     /// The Rust request refcount has the following states:
     ///
-    /// - 0: The request is owned by C block layer.
-    /// - 1: The request is owned by Rust abstractions but there are no [`ARef`] references to it.
-    /// - 2+: There are [`ARef`] references to the request.
+    /// - 0: The request is owned by C block layer or is uniquely referenced
+    /// - 1: The request is owned by Rust abstractions but is not referenced.
+    /// - 2+: There is one or more [`ARef`] instances referencing the request.
     refcount: Refcount,
 }
 
@@ -152,7 +151,18 @@ unsafe impl<T: Operations> Sync for Request<T> {}
 // decrement is executed.
 unsafe impl<T: Operations> AlwaysRefCounted for Request<T> {
     fn inc_ref(&self) {
-        self.wrapper_ref().refcount().inc();
+        let refcount = &self.wrapper_ref().refcount().as_atomic();
+
+        // Load acquire, store relaxed. We sync with store release of `UniqueRequestRef::into_aref`.
+        // After that all unique references are dead and we have shared access. We can use relaxed
+        // ordering for the store.
+        #[cfg_attr(not(CONFIG_DEBUG_MISC), allow(unused_variables))]
+        let old = refcount.fetch_add(1, Ordering::Acquire);
+
+        #[cfg(CONFIG_DEBUG_MISC)]
+        if old <= 1 {
+            panic!("Request refcount zero or one on clone\n");
+        }
     }
 
     unsafe fn dec_ref(obj: core::ptr::NonNull<Self>) {
@@ -163,12 +173,14 @@ unsafe impl<T: Operations> AlwaysRefCounted for Request<T> {
         // data area is initialized and valid.
         let refcount = unsafe { &*RequestDataWrapper::refcount_ptr(wrapper_ptr) };
 
+        // Store release ordering to sync with acquire load in
+        // `UniqueRequestRef::try_into_unique`.
         #[cfg_attr(not(CONFIG_DEBUG_MISC), allow(unused_variables))]
-        let is_zero = refcount.dec_and_test();
+        let old = refcount.as_atomic().fetch_sub(1, Ordering::Release);
 
         #[cfg(CONFIG_DEBUG_MISC)]
-        if is_zero {
-            panic!("Request reached refcount zero in Rust abstractions");
+        if old == 1 {
+            panic!("Request reached refcount zero in Rust abstractions\n");
         }
     }
 }
@@ -195,13 +207,14 @@ impl<T: Operations> URef<Request<T>> {
     /// This function will return [`Err`] if `this` is not the only [`ARef`]
     /// referencing the request.
     pub fn end_ok(self) {
-        self.wrapper_ref().refcount().as_atomic().store(0, Ordering::Relaxed);
+        let request_ptr = self.0.get().cast();
+        core::mem::forget(self);
 
         // SAFETY: By type invariant, `this.0` was a valid `struct request`. The
         // success of the call to `try_set_end` guarantees that there are no
         // `ARef`s pointing to this request. Therefore it is safe to hand it
         // back to the block layer.
-        unsafe { bindings::blk_mq_end_request(self.0.get().cast(), bindings::BLK_STS_OK as _) };
+        unsafe { bindings::blk_mq_end_request(request_ptr, bindings::BLK_STS_OK as _) };
     }
 }
 
@@ -209,31 +222,36 @@ unsafe impl<T: Operations> UniqueRefCounted for Request<T> {
     fn try_shared_to_unique(this: ARef<Self>) -> core::result::Result<URef<Self>, ARef<Self>> {
         // Load acquire to sync with decrement store release to make sure all
         // shared access has ended.
-        let updated = this.wrapper_ref().refcount().as_atomic().fetch_update(
-            Ordering::Relaxed,
+        let updated = this.wrapper_ref().refcount().as_atomic().compare_exchange(
+            2,
+            0,
             Ordering::Acquire,
-            |old| match old {
-                3 => Some(2),
-                _ => None,
-            },
+            Ordering::Relaxed,
         );
 
         match updated {
-            Ok(_old) => Ok(
+            Ok(_) => Ok(
                 // SAFETY: We achieved unique ownership above.
                 unsafe { URef::from_raw(ARef::into_raw(this)) },
             ),
-            Err(_old) => Err(this),
+            Err(_) => Err(this),
         }
     }
 
     fn unique_to_shared(this: URef<Self>) -> ARef<Self> {
         // Store release to sync with future increments using load acquire to
         // make sure exclusive access has ended before shared access start.
-        this.wrapper_ref()
+        #[cfg_attr(not(CONFIG_DEBUG_MISC), allow(unused_variables))]
+        let old = this
+            .wrapper_ref()
             .refcount()
             .as_atomic()
-            .fetch_add(1, Ordering::Release);
+            .fetch_add(2, Ordering::Release);
+
+        #[cfg(CONFIG_DEBUG_MISC)]
+        if old != 0 {
+            panic!("Invalid refcount when upgrading `URef<Request<T>>`\n");
+        }
 
         // SAFETY: We incremented the refcount above.
         unsafe { ARef::from_raw(URef::into_raw(this)) }
