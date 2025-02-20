@@ -7,9 +7,8 @@
 use crate::{
     bindings,
     block::mq::Operations,
-    error::Result,
     sync::Refcount,
-    types::{ARef, AlwaysRefCounted, Opaque},
+    types::{ARef, AlwaysRefCounted, Opaque, URef, UniqueRefCounted},
 };
 use core::{
     marker::PhantomData,
@@ -24,12 +23,12 @@ use core::{
 /// There are four states for a request that the Rust bindings care about:
 ///
 /// 1. Request is owned by block layer (refcount 0).
-/// 2. Request is owned by driver but with zero [`ARef`]s in existence
-///    (refcount 1).
-/// 3. Request is owned by driver with exactly one [`ARef`] in existence
+/// 2. Request is owned by driver but with no [`ARef`] or [`URef`] referencing
+///    the request (refcount 1).
+/// 3. Request is owned by driver with exactly one [`URef`] referencing the request
 ///    (refcount 2).
-/// 4. Request is owned by driver with more than one [`ARef`] in existence
-///    (refcount > 2).
+/// 4. Request is owned by driver with one or more [`ARef`] instances
+///    referencing the request (refcount >= 3).
 ///
 ///
 /// We need to track 1 and 2 to ensure we fail tag to request conversions for
@@ -69,73 +68,12 @@ impl<T: Operations> Request<T> {
     /// * The type invariants for [`Request`] must hold for the pointee of `ptr`.
     ///
     /// [`struct request`]: srctree/include/linux/blk-mq.h
+    #[expect(dead_code)]
     pub(crate) unsafe fn aref_from_raw(ptr: *mut bindings::request) -> ARef<Self> {
         // INVARIANT: By the safety requirements of this function, invariants are upheld.
         // SAFETY: By the safety requirement of this function, we own a
         // reference count that we can pass to `ARef`.
         unsafe { ARef::from_raw(NonNull::new_unchecked(ptr as *const Self as *mut Self)) }
-    }
-
-    /// Notify the block layer that a request is going to be processed now.
-    ///
-    /// The block layer uses this hook to do proper initializations such as
-    /// starting the timeout timer. It is a requirement that block device
-    /// drivers call this function when starting to process a request.
-    ///
-    /// # Safety
-    ///
-    /// The caller must have exclusive ownership of `self`, that is
-    /// `self.wrapper_ref().refcount() == 2`.
-    pub(crate) unsafe fn start_unchecked(this: &ARef<Self>) {
-        // SAFETY: By type invariant, `self.0` is a valid `struct request` and
-        // we have exclusive access.
-        unsafe { bindings::blk_mq_start_request(this.0.get()) };
-    }
-
-    /// Try to take exclusive ownership of `this` by dropping the refcount to 0.
-    /// This fails if `this` is not the only [`ARef`] pointing to the underlying
-    /// [`Request`].
-    ///
-    /// If the operation is successful, [`Ok`] is returned with a pointer to the
-    /// C [`struct request`]. If the operation fails, `this` is returned in the
-    /// [`Err`] variant.
-    ///
-    /// [`struct request`]: srctree/include/linux/blk-mq.h
-    fn try_set_end(this: ARef<Self>) -> Result<*mut bindings::request, ARef<Self>> {
-        // To hand back the ownership, we need the current refcount to be 2.
-        // Since we can race with `TagSet::tag_to_rq`, this needs to atomically reduce
-        // refcount to 0. `Refcount` does not provide a way to do this, so use the underlying
-        // atomics directly.
-        if this
-            .wrapper_ref()
-            .refcount()
-            .as_atomic()
-            .compare_exchange(2, 0, Ordering::Relaxed, Ordering::Relaxed)
-            .is_err()
-        {
-            return Err(this);
-        }
-
-        let request_ptr = this.0.get();
-        core::mem::forget(this);
-
-        Ok(request_ptr)
-    }
-
-    /// Notify the block layer that the request has been completed without errors.
-    ///
-    /// This function will return [`Err`] if `this` is not the only [`ARef`]
-    /// referencing the request.
-    pub fn end_ok(this: ARef<Self>) -> Result<(), ARef<Self>> {
-        let request_ptr = Self::try_set_end(this)?;
-
-        // SAFETY: By type invariant, `this.0` was a valid `struct request`. The
-        // success of the call to `try_set_end` guarantees that there are no
-        // `ARef`s pointing to this request. Therefore it is safe to hand it
-        // back to the block layer.
-        unsafe { bindings::blk_mq_end_request(request_ptr, bindings::BLK_STS_OK as _) };
-
-        Ok(())
     }
 
     /// Return a pointer to the [`RequestDataWrapper`] stored in the private area
@@ -232,5 +170,72 @@ unsafe impl<T: Operations> AlwaysRefCounted for Request<T> {
         if is_zero {
             panic!("Request reached refcount zero in Rust abstractions");
         }
+    }
+}
+
+impl<T: Operations> URef<Request<T>> {
+    /// Notify the block layer that a request is going to be processed now.
+    ///
+    /// The block layer uses this hook to do proper initializations such as
+    /// starting the timeout timer. It is a requirement that block device
+    /// drivers call this function when starting to process a request.
+    ///
+    /// # Safety
+    ///
+    /// The caller must have exclusive ownership of `self`, that is
+    /// `self.wrapper_ref().refcount() == 2`.
+    pub(crate) unsafe fn start_unchecked(&mut self) {
+        // SAFETY: By type invariant, `self.0` is a valid `struct request` and
+        // we have exclusive access.
+        unsafe { bindings::blk_mq_start_request(self.0.get()) };
+    }
+
+    /// Notify the block layer that the request has been completed without errors.
+    ///
+    /// This function will return [`Err`] if `this` is not the only [`ARef`]
+    /// referencing the request.
+    pub fn end_ok(self) {
+        self.wrapper_ref().refcount().as_atomic().store(0, Ordering::Relaxed);
+
+        // SAFETY: By type invariant, `this.0` was a valid `struct request`. The
+        // success of the call to `try_set_end` guarantees that there are no
+        // `ARef`s pointing to this request. Therefore it is safe to hand it
+        // back to the block layer.
+        unsafe { bindings::blk_mq_end_request(self.0.get().cast(), bindings::BLK_STS_OK as _) };
+    }
+}
+
+unsafe impl<T: Operations> UniqueRefCounted for Request<T> {
+    fn try_shared_to_unique(this: ARef<Self>) -> core::result::Result<URef<Self>, ARef<Self>> {
+        // Load acquire to sync with decrement store release to make sure all
+        // shared access has ended.
+        let updated = this.wrapper_ref().refcount().as_atomic().fetch_update(
+            Ordering::Relaxed,
+            Ordering::Acquire,
+            |old| match old {
+                3 => Some(2),
+                _ => None,
+            },
+        );
+
+        match updated {
+            Ok(_old) => Ok(
+                // SAFETY: We achieved unique ownership above.
+                unsafe { URef::from_raw(ARef::into_raw(this)) },
+            ),
+            Err(_old) => Err(this),
+        }
+    }
+
+    fn unique_to_shared(this: URef<Self>) -> ARef<Self> {
+        // Store release to sync with future increments using load acquire to
+        // make sure exclusive access has ended before shared access start.
+        this.wrapper_ref()
+            .refcount()
+            .as_atomic()
+            .fetch_add(1, Ordering::Release);
+
+        // SAFETY: We incremented the refcount above.
+        unsafe { ARef::from_raw(URef::into_raw(this)) }
     }
 }
