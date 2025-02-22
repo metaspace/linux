@@ -65,6 +65,298 @@
 //!
 //! A `restart` operation on a timer in the **stopped** state is equivalent to a
 //! `start` operation.
+//!
+//! ```
+//! use kernel::{
+//!     time::hrtimer::{ClockSource,HrTimer, HrTimerCallback, HrTimerMode, HrTimerPointer, HrTimerRestart},
+//!     impl_has_hr_timer, new_condvar, new_mutex,
+//!     prelude::*,
+//!     sync::{Arc, CondVar, Mutex},
+//!     time::Ktime,
+//!     alloc::flags,
+//! };
+//!
+//! #[pin_data]
+//! struct Shared {
+//!     #[pin]
+//!     flag: Mutex<u64>,
+//!     #[pin]
+//!     cond: CondVar,
+//! }
+//!
+//! impl Shared {
+//!     fn new() -> impl PinInit<Self, kernel::error::Error> {
+//!         try_pin_init!(Self {
+//!             flag <- new_mutex!(0),
+//!             cond <- new_condvar!(),
+//!         })
+//!     }
+//! }
+//!
+//!
+//!
+//! #[pin_data]
+//! struct BoxIntrusiveHrTimer {
+//!     #[pin]
+//!     timer: HrTimer<Self>,
+//!     shared: Arc<Shared>,
+//! }
+//!
+//! impl BoxIntrusiveHrTimer {
+//!     fn new() -> impl PinInit<Self, kernel::error::Error> {
+//!         try_pin_init!(Self {
+//!             timer <- HrTimer::new(HrTimerMode::Relative, ClockSource::Monotonic),
+//!             shared: Arc::pin_init(Shared::new(), flags::GFP_KERNEL).unwrap(),
+//!         })
+//!     }
+//! }
+//!
+//! impl HrTimerCallback for BoxIntrusiveHrTimer {
+//!     type Pointer<'a> = Pin<KBox<Self>>;
+//!
+//!     fn run(this: Pin<&Self>) -> HrTimerRestart {
+//!         pr_info!("Timer called\n");
+//!         let mut guard = this.shared.flag.lock();
+//!         *guard += 1;
+//!         this.shared.cond.notify_all();
+//!         if *guard == 5 {
+//!             HrTimerRestart::NoRestart
+//!         }
+//!         else {
+//!             HrTimerRestart::Restart
+//!
+//!         }
+//!     }
+//! }
+//!
+//! impl_has_hr_timer! {
+//!     impl HasHrTimer<Self> for BoxIntrusiveHrTimer { self.timer }
+//! }
+//!
+//!
+//! let has_timer = Box::pin_init(BoxIntrusiveHrTimer::new(), GFP_KERNEL)?;
+//! let shared = has_timer.shared.clone();
+//! let _handle = has_timer.start(Ktime::from_nanos(200_000_000));
+//! let mut guard = shared.flag.lock();
+//!
+//! while *guard != 5 {
+//!     shared.cond.wait(&mut guard);
+//! }
+//!
+//! pr_info!("Counted to 5\n");
+//! # Ok::<(), kernel::error::Error>(())
+//! ```
+//! 
+//! ```
+//! use kernel::{
+//!     time::hrtimer::{ClockSource, HrTimer, HrTimerCallback, HrTimerMode, HrTimerPointer, HrTimerRestart},
+//!     impl_has_hr_timer, new_condvar, new_mutex,
+//!     prelude::*,
+//!     sync::{Arc, ArcBorrow, CondVar, Mutex},
+//!     time::Ktime,
+//!     time::hrtimer::HasHrTimer,
+//! };
+//!
+//! #[pin_data]
+//! struct ArcIntrusiveHrTimer {
+//!     #[pin]
+//!     timer: HrTimer<Self>,
+//!     #[pin]
+//!     flag: Mutex<u64>,
+//!     #[pin]
+//!     cond: CondVar,
+//! }
+//!
+//! impl ArcIntrusiveHrTimer {
+//!     fn new() -> impl PinInit<Self, kernel::error::Error> {
+//!         try_pin_init!(Self {
+//!             timer <- HrTimer::new(HrTimerMode::Relative, ClockSource::Monotonic),
+//!             flag <- new_mutex!(0),
+//!             cond <- new_condvar!(),
+//!         })
+//!     }
+//! }
+//!
+//! impl HrTimerCallback for ArcIntrusiveHrTimer {
+//!     type Pointer<'a> = Arc<Self>;
+//!
+//!     fn run(this: ArcBorrow<'_, Self>) -> HrTimerRestart {
+//!         pr_info!("Timer called\n");
+//!         let mut guard = this.flag.lock();
+//!         *guard += 1;
+//!         this.cond.notify_all();
+//!         if *guard == 5 {
+//!             HrTimerRestart::NoRestart
+//!         }
+//!         else {
+//!             HrTimerRestart::Restart
+//!
+//!         }
+//!     }
+//! }
+//!
+//! impl_has_hr_timer! {
+//!     impl HasHrTimer<Self> for ArcIntrusiveHrTimer { self.timer }
+//! }
+//!
+//!
+//! let has_timer = Arc::pin_init(ArcIntrusiveHrTimer::new(), GFP_KERNEL)?;
+//! let _handle = has_timer.clone().start(Ktime::from_nanos(200_000_000));
+//! let mut guard = has_timer.flag.lock();
+//!
+//! while *guard != 5 {
+//!     has_timer.cond.wait(&mut guard);
+//! }
+//!
+//! pr_info!("Counted to 5\n");
+//! # Ok::<(), kernel::error::Error>(())
+//! ```
+//!
+//! Using a stack based timer:
+//! ```
+//! use kernel::{
+//!     time::hrtimer::{ClockSource, ScopedHrTimerPointer, HrTimer, HrTimerCallback, HrTimerMode, HrTimerPointer, HrTimerRestart},
+//!     impl_has_hr_timer, new_condvar, new_mutex,
+//!     prelude::*,
+//!     stack_try_pin_init,
+//!     sync::{CondVar, Mutex},
+//!     time::Ktime,
+//!     time::hrtimer::HasHrTimer,
+//! };
+//!
+//! #[pin_data]
+//! struct IntrusiveHrTimer {
+//!     #[pin]
+//!     timer: HrTimer<Self>,
+//!     #[pin]
+//!     flag: Mutex<bool>,
+//!     #[pin]
+//!     cond: CondVar,
+//! }
+//!
+//! impl IntrusiveHrTimer {
+//!     fn new() -> impl PinInit<Self, kernel::error::Error> {
+//!         try_pin_init!(Self {
+//!             timer <- HrTimer::new(HrTimerMode::Relative, ClockSource::Monotonic),
+//!             flag <- new_mutex!(false),
+//!             cond <- new_condvar!(),
+//!         })
+//!     }
+//! }
+//!
+//! impl HrTimerCallback for IntrusiveHrTimer {
+//!     type Pointer<'a> = Pin<&'a Self>;
+//!
+//!     fn run(this: Pin<&Self>) -> HrTimerRestart {
+//!         pr_info!("Timer called\n");
+//!         *this.flag.lock() = true;
+//!         this.cond.notify_all();
+//!         HrTimerRestart::NoRestart
+//!     }
+//! }
+//!
+//! impl_has_hr_timer! {
+//!     impl HasHrTimer<Self> for IntrusiveHrTimer { self.timer }
+//! }
+//!
+//!
+//! stack_try_pin_init!( let has_timer =? IntrusiveHrTimer::new() );
+//! has_timer.as_ref().start_scoped(Ktime::from_nanos(200_000_000), || {
+//!     let mut guard = has_timer.flag.lock();
+//!
+//!     while !*guard {
+//!         has_timer.cond.wait(&mut guard);
+//!     }
+//! });
+//!
+//! pr_info!("Flag raised\n");
+//! # Ok::<(), kernel::error::Error>(())
+//! ```
+//!
+//! Using a mutable stack based timer:
+//! ```
+//! use kernel::{
+//!     alloc::flags,
+//!     time::hrtimer::{ClockSource, ScopedHrTimerPointer, HrTimer, HrTimerCallback, HrTimerMode, HrTimerPointer, HrTimerRestart},
+//!     impl_has_hr_timer, new_condvar, new_mutex,
+//!     prelude::*,
+//!     stack_try_pin_init,
+//!     sync::{Arc, CondVar, Mutex},
+//!     time::Ktime,
+//!     time::hrtimer::HasHrTimer,
+//! };
+//!
+//! #[pin_data]
+//! struct Shared {
+//!     #[pin]
+//!     flag: Mutex<u64>,
+//!     #[pin]
+//!     cond: CondVar,
+//! }
+//!
+//! impl Shared {
+//!     fn new() -> impl PinInit<Self, kernel::error::Error> {
+//!         try_pin_init!(Self {
+//!             flag <- new_mutex!(0),
+//!             cond <- new_condvar!(),
+//!         })
+//!     }
+//! }
+//!
+//!
+//!
+//! #[pin_data]
+//! struct IntrusiveHrTimer {
+//!     #[pin]
+//!     timer: HrTimer<Self>,
+//!     shared: Arc<Shared>,
+//! }
+//!
+//! impl IntrusiveHrTimer {
+//!     fn new() -> impl PinInit<Self, kernel::error::Error> {
+//!         try_pin_init!(Self {
+//!             timer <- HrTimer::new(HrTimerMode::Relative, ClockSource::Monotonic),
+//!             shared: Arc::pin_init(Shared::new(), flags::GFP_KERNEL).unwrap(),
+//!         })
+//!     }
+//! }
+//!
+//! impl HrTimerCallback for IntrusiveHrTimer {
+//!     type Pointer<'a> = Pin<&'a mut Self>;
+//!
+//!     fn run(this: Pin<&mut Self>) -> HrTimerRestart {
+//!         pr_info!("Timer called\n");
+//!         let mut guard = this.shared.flag.lock();
+//!         *guard += 1;
+//!         this.shared.cond.notify_all();
+//!         if *guard == 5 {
+//!             HrTimerRestart::NoRestart
+//!         }
+//!         else {
+//!             HrTimerRestart::Restart
+//!
+//!         }
+//!     }
+//! }
+//!
+//! impl_has_hr_timer! {
+//!     impl HasHrTimer<Self> for IntrusiveHrTimer { self.timer }
+//! }
+//!
+//!
+//! stack_try_pin_init!( let has_timer =? IntrusiveHrTimer::new() );
+//! let shared = has_timer.shared.clone();
+//! has_timer.as_mut().start_scoped(Ktime::from_nanos(200_000_000), || {
+//!     let mut guard = shared.flag.lock();
+//!
+//!     while *guard != 5 {
+//!         shared.cond.wait(&mut guard);
+//!     }
+//! });
+//!
+//! pr_info!("Flag raised\n");
+//! # Ok::<(), kernel::error::Error>(())
+//!
 
 use crate::{init::PinInit, prelude::*, time::Ktime, types::Opaque};
 use core::{marker::PhantomData, ptr::NonNull};
