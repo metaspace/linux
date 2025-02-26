@@ -238,4 +238,23 @@ unsafe impl<T: Operations> UniqueRefCounted for Request<T> {
         // SAFETY: We incremented the refcount above.
         unsafe { ARef::from_raw(URef::into_raw(this)) }
     }
+
+    unsafe fn dec_ref(obj: core::ptr::NonNull<Self>) {
+        // SAFETY: The type invariants of `URef` guarantee that `obj` is valid
+        // for read.
+        let wrapper_ptr = unsafe { Self::wrapper_ptr(obj.as_ptr()).as_ptr() };
+        // SAFETY: The type invariant of `Request` guarantees that the private
+        // data area is initialized and valid.
+        let refcount = unsafe { &*RequestDataWrapper::refcount_ptr(wrapper_ptr) };
+
+        // Store release ordering to sync with acquire load in
+        // `TagSet::tag_to_rq()`.
+        #[cfg_attr(not(CONFIG_DEBUG_MISC), allow(unused_variables))]
+        let old = refcount.as_atomic().swap(1, Ordering::Release);
+
+        #[cfg(CONFIG_DEBUG_MISC)]
+        if old != 0 {
+            panic!("Invalid refcount when dropping `URef<Request<T>>`\n");
+        }
+    }
 }
