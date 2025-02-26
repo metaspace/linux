@@ -562,6 +562,25 @@ impl<T: AlwaysRefCounted> Drop for ARef<T> {
 pub unsafe trait UniqueRefCounted: AlwaysRefCounted + Sized {
     fn try_shared_to_unique(this: ARef<Self>) -> Result<URef<Self>,ARef<Self>>;
     fn unique_to_shared(this: URef<Self>) -> ARef<Self>;
+    /// Decrements the reference count on the object when the [URef] is dropped.
+    ///
+    /// Frees the object when the count reaches zero.
+    ///
+    /// It defaults to [`AlwaysRefCounted::dec_ref`],
+    /// but overriding it may be useful, e.g. in case of non-standard refcounting
+    /// schemes.
+    ///
+    /// # Safety
+    ///
+    /// The same safety constraints as for [`AlwaysRefCounted::dec_ref`] apply,
+    /// but as the reference is unique, it can be assumed that the function
+    /// will not be called twice. In case the default implementation is not
+    /// overridden, it has to be ensured that the call to [`AlwaysRefCounted::dec_ref`]
+    /// can be used for an [URef], too.
+    unsafe fn dec_ref(obj: NonNull<Self>) {
+	// SAFETY: correct by function safety requirements
+        unsafe { AlwaysRefCounted::dec_ref(obj) };
+    }
 }
 
 /// An owned reference to an always-reference-counted object.
@@ -656,7 +675,7 @@ impl<T: UniqueRefCounted> Drop for URef<T> {
     fn drop(&mut self) {
         // SAFETY: The type invariants guarantee that the `URef` owns the reference we're about to
         // decrement.
-        unsafe { T::dec_ref(self.ptr) };
+        unsafe { UniqueRefCounted::dec_ref(self.ptr) };
     }
 }
 
