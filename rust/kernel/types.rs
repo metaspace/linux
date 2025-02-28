@@ -728,6 +728,7 @@ pub unsafe trait OwnableMut: Ownable {}
 /// # Invariants
 ///
 /// The pointer stored in `ptr` is non-null and valid for the lifetime of the [`Owned`] instance.
+#[repr(transparent)]
 pub struct Owned<T: Ownable> {
     ptr: NonNull<T>,
     _p: PhantomData<T>,
@@ -792,6 +793,41 @@ impl<T: Ownable> Drop for Owned<T> {
         // SAFETY: The type invariants guarantee that the `Owned` owns the object we're about to
         // release.
         unsafe { T::release(self.ptr) };
+    }
+}
+
+// SAFETY: We derive the pointer to `T` from a valid `T`, so the returned
+// pointer satisfy alignment requirements of `T`.
+unsafe impl<T: Ownable + 'static> ForeignOwnable for Owned<T> {
+    type PointedTo = T;
+
+    type Borrowed<'a> = &'a T;
+
+    type BorrowedMut<'a> = &'a mut T;
+
+    fn into_foreign(self) -> *mut Self::PointedTo {
+        let ptr = self.ptr.as_ptr();
+        core::mem::forget(self);
+        ptr
+    }
+
+    unsafe fn from_foreign(ptr: *mut Self::PointedTo) -> Self {
+        Self {
+            ptr: unsafe { NonNull::new_unchecked(ptr) },
+            _p: PhantomData,
+        }
+    }
+
+    unsafe fn borrow<'a>(ptr: *mut Self::PointedTo) -> Self::Borrowed<'a> {
+        // SAFETY: By function safety requirements, `ptr` is valid for use as a
+        // reference for `'a`.
+        unsafe { &*ptr }
+    }
+
+    unsafe fn borrow_mut<'a>(ptr: *mut Self::PointedTo) -> Self::BorrowedMut<'a> {
+        // SAFETY: By function safety requirements, `ptr` is valid for use as a
+        // unique reference for `'a`.
+        unsafe { &mut *ptr }
     }
 }
 
