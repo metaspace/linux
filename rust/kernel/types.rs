@@ -446,3 +446,18 @@ pub type NotThreadSafe = PhantomData<*mut ()>;
 /// [`NotThreadSafe`]: type@NotThreadSafe
 #[allow(non_upper_case_globals)]
 pub const NotThreadSafe: NotThreadSafe = PhantomData;
+
+/// An iterator trait that borrows items from the iterator rather than the
+/// iterated collection.
+///
+/// See [`core::iter::Iterator`] for an iterator that borrows from the iterated
+/// collection/
+pub trait BorrowIterator {
+    /// The type of elements being iterated over.
+    type Item<'a> where Self: 'a;
+
+    /// Advances the iterator and raturns the next value.
+    ///
+    /// Returns [`None`] when iteration is finished.
+    fn next<'a>(&'a mut self) -> Option<Self::Item<'a>>;
+}
