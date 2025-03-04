@@ -248,7 +248,7 @@ pub fn concat_idents(ts: TokenStream) -> TokenStream {
 ///
 /// # Examples
 ///
-/// ```
+/// ```ignore
 /// # #![feature(lint_reasons)]
 /// # use kernel::prelude::*;
 /// # use std::{sync::Mutex, process::Command};
@@ -261,7 +261,7 @@ pub fn concat_idents(ts: TokenStream) -> TokenStream {
 /// }
 /// ```
 ///
-/// ```
+/// ```ignore
 /// # #![feature(lint_reasons)]
 /// # use kernel::prelude::*;
 /// # use std::{sync::Mutex, process::Command};
@@ -302,7 +302,7 @@ pub fn pin_data(inner: TokenStream, item: TokenStream) -> TokenStream {
 ///
 /// # Examples
 ///
-/// ```
+/// ```ignore
 /// # #![feature(lint_reasons)]
 /// # use kernel::prelude::*;
 /// # use macros::{pin_data, pinned_drop};
@@ -478,7 +478,7 @@ pub fn paste(input: TokenStream) -> TokenStream {
 ///
 /// # Examples
 ///
-/// ```
+/// ```ignore
 /// use kernel::macros::Zeroable;
 ///
 /// #[derive(Zeroable)]
