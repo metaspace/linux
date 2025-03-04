@@ -105,7 +105,7 @@ pub unsafe trait InitData: Copy {
     }
 }
 
-pub struct AllData<T: ?Sized>(PhantomData<fn(KBox<T>) -> KBox<T>>);
+pub struct AllData<T: ?Sized>(Invariant<T>);
 
 impl<T: ?Sized> Clone for AllData<T> {
     fn clone(&self) -> Self {
