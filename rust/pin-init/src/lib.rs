@@ -341,8 +341,6 @@ pub use alloc::InPlaceInit;
 ///     }
 /// }
 /// ```
-///
-/// [`pin_init!`]: crate::pin_init
 pub use ::pin_init_internal::pin_data;
 
 /// Used to implement `PinnedDrop` safely.
