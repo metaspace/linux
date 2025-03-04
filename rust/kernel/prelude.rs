@@ -28,7 +28,8 @@ pub use super::fmt;
 pub use super::{dev_alert, dev_crit, dev_dbg, dev_emerg, dev_err, dev_info, dev_notice, dev_warn};
 pub use super::{pr_alert, pr_crit, pr_debug, pr_emerg, pr_err, pr_info, pr_notice, pr_warn};
 
-pub use super::{init, pin_init, try_init, try_pin_init};
+pub use super::{init, pin_init};
+pub use super::{try_init, try_pin_init};
 
 pub use super::static_assert;
 
