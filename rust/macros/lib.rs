@@ -2,23 +2,20 @@
 
 //! Crate for all kernel procedural macros.
 
+#![feature(lint_reasons)]
+
 // When fixdep scans this, it will find this string `CONFIG_RUSTC_VERSION_TEXT`
 // and thus add a dependency on `include/config/RUSTC_VERSION_TEXT`, which is
 // touched by Kconfig when the version string from the compiler changes.
 
 #[macro_use]
+#[expect(unused_macros)]
 mod quote;
 mod concat_idents;
 mod helpers;
 mod module;
 mod paste;
-#[path = "../pin-init/internal/src/pin_data.rs"]
-mod pin_data;
-#[path = "../pin-init/internal/src/pinned_drop.rs"]
-mod pinned_drop;
 mod vtable;
-#[path = "../pin-init/internal/src/zeroable.rs"]
-mod zeroable;
 
 use proc_macro::TokenStream;
 
@@ -374,5 +371,3 @@ pub fn paste(input: TokenStream) -> TokenStream {
     paste::expand(&mut tokens);
     tokens.into_iter().collect()
 }
-
-include!("../pin-init/internal/src/lib.rs");
