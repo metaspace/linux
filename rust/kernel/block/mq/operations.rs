@@ -8,12 +8,12 @@ use crate::{
     bindings,
     block::mq::{request::RequestDataWrapper, Request},
     error::{from_result, Result},
-    init::PinInit,
     prelude::*,
     sync::Refcount,
     types::{ARef, ForeignOwnable, URef},
 };
 use core::{marker::PhantomData, ptr::NonNull};
+use pin_init::PinInit;
 
 type ForeignBorrowed<'a, T> = <T as ForeignOwnable>::Borrowed<'a>;
 

@@ -5,15 +5,14 @@ use kernel::{
     block::mq::gen_disk::{GenDisk, GenDiskBuilder},
     c_str,
     configfs::{self, AttributeOperations},
-    configfs_attrs,
-    init::PinInit,
-    new_mutex,
+    configfs_attrs, new_mutex,
     page::PAGE_SIZE,
     prelude::*,
     str::CString,
     sync::Mutex,
     time::Ktime,
 };
+use pin_init::PinInit;
 
 pub(crate) fn subsystem() -> impl PinInit<kernel::configfs::Subsystem<Config>, Error> {
     let item_type = configfs_attrs! {

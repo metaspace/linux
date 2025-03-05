@@ -75,7 +75,7 @@
 //!
 //!     fn new_request_data(
 //!     ) -> impl PinInit<()> {
-//!         kernel::init::zeroed()
+//!         pin_init::zeroed()
 //!     }
 //!
 //!     fn queue_rq(_queue_data: (), rq: URef<Request<Self>>, _is_last: bool) -> Result {

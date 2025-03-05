@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 
-use macros::pin_data;
-
-use crate::{init::PinInit, pin_init, try_pin_init};
+use kernel::try_pin_init;
+use pin_init::{pin_data, pin_init, PinInit};
 
 /// Wrapper type that alings content to a cache line.
 #[repr(align(64))]
@@ -19,9 +18,7 @@ impl<T> CacheAligned<T> {
     }
 
     /// Creates an initializer for `CacheAligned<T>` form an initalizer for `T`
-    pub fn new_initializer(
-        t: impl PinInit<T>,
-    ) -> impl PinInit<CacheAligned<T>> {
+    pub fn new_initializer(t: impl PinInit<T>) -> impl PinInit<CacheAligned<T>> {
         pin_init!( CacheAligned {
             value <- t
         })
