@@ -5,9 +5,10 @@
  */
 
 #include <linux/jump_label.h>
+#include "helpers.h"
 
 #ifndef CONFIG_JUMP_LABEL
-int rust_helper_static_key_count(struct static_key *key)
+__rust_helper int rust_helper_static_key_count(struct static_key *key)
 {
 	return static_key_count(key);
 }

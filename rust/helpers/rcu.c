@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: GPL-2.0
 
 #include <linux/rcupdate.h>
+#include "helpers.h"
 
-void rust_helper_rcu_read_lock(void)
+__rust_helper void rust_helper_rcu_read_lock(void)
 {
 	rcu_read_lock();
 }
 
-void rust_helper_rcu_read_unlock(void)
+__rust_helper void rust_helper_rcu_read_unlock(void)
 {
 	rcu_read_unlock();
 }
