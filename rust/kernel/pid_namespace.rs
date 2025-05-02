@@ -9,7 +9,7 @@
 
 use crate::{
     bindings,
-    types::{AlwaysRefCounted, Opaque},
+    types::{AlwaysRefCounted, Opaque, RefCounted},
 };
 use core::ptr;
 
@@ -44,7 +44,7 @@ impl PidNamespace {
 }
 
 // SAFETY: Instances of `PidNamespace` are always reference-counted.
-unsafe impl AlwaysRefCounted for PidNamespace {
+unsafe impl RefCounted for PidNamespace {
     #[inline]
     fn inc_ref(&self) {
         // SAFETY: The existence of a shared reference means that the refcount is nonzero.
@@ -57,6 +57,10 @@ unsafe impl AlwaysRefCounted for PidNamespace {
         unsafe { bindings::put_pid_ns(obj.cast().as_ptr()) }
     }
 }
+
+// SAFETY: We do not implement `Ownable`, thus it is okay to can obtain an `ARef<PidNamespace>`
+// from a `&PidNamespace`.
+unsafe impl AlwaysRefCounted for PidNamespace {}
 
 // SAFETY:
 // - `PidNamespace::dec_ref` can be called from any thread.

@@ -329,7 +329,7 @@ impl Task {
 }
 
 // SAFETY: The type invariants guarantee that `Task` is always refcounted.
-unsafe impl crate::types::AlwaysRefCounted for Task {
+unsafe impl crate::types::RefCounted for Task {
     fn inc_ref(&self) {
         // SAFETY: The existence of a shared reference means that the refcount is nonzero.
         unsafe { bindings::get_task_struct(self.as_ptr()) };
@@ -340,6 +340,10 @@ unsafe impl crate::types::AlwaysRefCounted for Task {
         unsafe { bindings::put_task_struct(obj.cast().as_ptr()) }
     }
 }
+
+// SAFETY: We do not implement `Ownable`, thus it is okay to can obtain an `ARef<Task>` from a
+// `&Task`.
+unsafe impl crate::types::AlwaysRefCounted for Task {}
 
 impl Kuid {
     /// Get the current euid.

@@ -443,7 +443,7 @@ impl From<&Device<device::Core>> for ARef<Device> {
 }
 
 // SAFETY: Instances of `Device` are always reference-counted.
-unsafe impl crate::types::AlwaysRefCounted for Device {
+unsafe impl crate::types::RefCounted for Device {
     fn inc_ref(&self) {
         // SAFETY: The existence of a shared reference guarantees that the refcount is non-zero.
         unsafe { bindings::pci_dev_get(self.as_raw()) };
@@ -454,6 +454,10 @@ unsafe impl crate::types::AlwaysRefCounted for Device {
         unsafe { bindings::pci_dev_put(obj.cast().as_ptr()) }
     }
 }
+
+// SAFETY: We do not implement `Ownable`, thus it is okay to can obtain an `ARef<Device>` from a
+// `&Device`.
+unsafe impl crate::types::AlwaysRefCounted for Device {}
 
 impl AsRef<device::Device> for Device {
     fn as_ref(&self) -> &device::Device {
