@@ -12,7 +12,7 @@ use core::{
 use pin_init::{PinInit, Zeroable};
 
 pub mod ownable;
-pub use ownable::{Ownable, OwnableMut, Owned};
+pub use ownable::{Ownable, OwnableMut, OwnableRefCounted, Owned, SimpleOwnableRefCounted};
 
 /// Used to transfer ownership to and from foreign (non-Rust) languages.
 ///
@@ -557,6 +557,12 @@ impl<T: AlwaysRefCounted> From<&T> for ARef<T> {
         b.inc_ref();
         // SAFETY: We just incremented the refcount above.
         unsafe { Self::from_raw(NonNull::from(b)) }
+    }
+}
+
+impl<T: OwnableRefCounted> From<Owned<T>> for ARef<T> {
+    fn from(b: Owned<T>) -> Self {
+        T::into_shared(b)
     }
 }
 
