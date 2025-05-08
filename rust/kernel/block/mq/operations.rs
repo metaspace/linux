@@ -11,8 +11,12 @@ use crate::{
     prelude::*,
     sync::Refcount,
     types::{ARef, ForeignOwnable},
+    types::Owned,
 };
-use core::marker::PhantomData;
+use core::{
+    marker::PhantomData,
+    ptr::NonNull,
+};
 
 type ForeignBorrowed<'a, T> = <T as ForeignOwnable>::Borrowed<'a>;
 
@@ -36,9 +40,7 @@ pub trait Operations: Sized {
     /// `false`, the driver is allowed to defer committing the request.
     fn queue_rq(
         queue_data: ForeignBorrowed<'_, Self::QueueData>,
-        rq: ARef<Request<Self>>,
-        is_last: bool,
-    ) -> Result;
+        rq: Owned<Request<Self>>, is_last: bool) -> Result;
 
     /// Called by the kernel to indicate that queued requests should be submitted.
     fn commit_rqs(queue_data: ForeignBorrowed<'_, Self::QueueData>);
@@ -90,16 +92,23 @@ impl<T: Operations> OperationsVTable<T> {
         // this function.
         let request = unsafe { &*(*bd).rq.cast::<Request<T>>() };
 
-        // One refcount for the ARef, one for being in flight
-        request.wrapper_ref().refcount().set(2);
+        debug_assert!(
+            request
+                .wrapper_ref()
+                .refcount()
+                .as_atomic()
+                .load(core::sync::atomic::Ordering::Acquire)
+                == 0
+        );
 
         // SAFETY:
-        //  - We own a refcount that we took above. We pass that to `ARef`.
+        //  - By API contract, we own the request.
         //  - By the safety requirements of this function, `request` is a valid
         //    `struct request` and the private data is properly initialized.
         //  - `rq` will be alive until `blk_mq_end_request` is called and is
-        //    reference counted by `ARef` until then.
-        let rq = unsafe { Request::aref_from_raw((*bd).rq) };
+        //    reference counted by until then.
+        let mut rq =
+            unsafe { Owned::from_raw(NonNull::<Request<T>>::new_unchecked((*bd).rq.cast())) };
 
         // SAFETY: `hctx` is valid as required by this function.
         let queue_data = unsafe { (*(*hctx).queue).queuedata };
@@ -111,7 +120,7 @@ impl<T: Operations> OperationsVTable<T> {
         let queue_data = unsafe { T::QueueData::borrow(queue_data) };
 
         // SAFETY: We have exclusive access and we just set the refcount above.
-        unsafe { Request::start_unchecked(&rq) };
+        unsafe { rq.start_unchecked() };
 
         let ret = T::queue_rq(
             queue_data,
