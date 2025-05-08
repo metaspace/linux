@@ -62,7 +62,7 @@
 //!     new_mutex,
 //!     prelude::*,
 //!     sync::{Arc, Mutex},
-//!     types::{ARef, ForeignOwnable},
+//!     types::{Owned, ForeignOwnable},
 //! };
 //!
 //! struct MyBlkDevice;
@@ -70,8 +70,8 @@
 //! #[vtable]
 //! impl Operations for MyBlkDevice {
 //!
-//!     fn queue_rq(rq: ARef<Request<Self>>, _is_last: bool) -> Result {
-//!         Request::end_ok(rq);
+//!     fn queue_rq(rq: Owned<Request<Self>>, _is_last: bool) -> Result {
+//!         rq.end_ok();
 //!         Ok(())
 //!     }
 //!
