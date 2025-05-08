@@ -62,6 +62,7 @@
 //!     new_mutex,
 //!     prelude::*,
 //!     sync::{aref::ARef, Arc, Mutex},
+//!     types::{ForeignOwnable, OwnableRefCounted, Owned},
 //! };
 //!
 //! struct MyBlkDevice;
@@ -70,17 +71,18 @@
 //! impl Operations for MyBlkDevice {
 //!     type QueueData = ();
 //!
-//!     fn queue_rq(_queue_data: (), rq: ARef<Request<Self>>, _is_last: bool) -> Result {
-//!         Request::end_ok(rq);
+//!     fn queue_rq(_queue_data: (), rq: Owned<Request<Self>>, _is_last: bool) -> Result {
+//!         rq.end_ok();
 //!         Ok(())
 //!     }
 //!
 //!     fn commit_rqs(_queue_data: ()) {}
 //!
 //!     fn complete(rq: ARef<Request<Self>>) {
-//!         Request::end_ok(rq)
+//!         OwnableRefCounted::try_from_shared(rq)
 //!             .map_err(|_e| kernel::error::code::EIO)
-//!             .expect("Fatal error - expected to be able to end request");
+//!             .expect("Fatal error - expected to be able to end request")
+//!             .end_ok();
 //!     }
 //! }
 //!
