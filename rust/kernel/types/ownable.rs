@@ -17,10 +17,11 @@ use core::{
 ///
 /// This is usually implemented by wrappers to existing structures on the C side of the code.
 ///
-/// Note: Implementing this trait allows types to be wrapped in an [`Owned<Self>`]. This does not
-/// provide reference counting but represents a unique, owned reference. If reference counting is
-/// required [`AlwaysRefCounted`](crate::types::AlwaysRefCounted) should be implemented which allows
-/// types to be wrapped in an [`ARef<Self>`](crate::types::ARef).
+/// Note: Implementing this trait allows types to be wrapped in an
+/// [`Owned<Self>`]. This does not provide reference counting but represents a
+/// unique, owned reference. If reference counting is required
+/// [`RefCounted`](crate::sync::aref::RefCounted) should be implemented which
+/// allows types to be wrapped in an [`ARef<Self>`](crate::sync::aref::ARef).
 ///
 /// # Safety
 ///

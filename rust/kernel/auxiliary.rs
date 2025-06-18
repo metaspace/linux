@@ -10,6 +10,7 @@ use crate::{
     driver,
     error::{from_result, to_result, Result},
     prelude::*,
+    sync::aref::{AlwaysRefCounted, RefCounted},
     types::Opaque,
     ThisModule,
 };
@@ -245,7 +246,7 @@ kernel::impl_device_context_deref!(unsafe { Device });
 kernel::impl_device_context_into_aref!(Device);
 
 // SAFETY: Instances of `Device` are always reference-counted.
-unsafe impl crate::types::AlwaysRefCounted for Device {
+unsafe impl RefCounted for Device {
     fn inc_ref(&self) {
         // SAFETY: The existence of a shared reference guarantees that the refcount is non-zero.
         unsafe { bindings::get_device(self.as_ref().as_raw()) };
@@ -263,6 +264,10 @@ unsafe impl crate::types::AlwaysRefCounted for Device {
         unsafe { bindings::put_device(dev) }
     }
 }
+
+// SAFETY: We do not implement `Ownable`, thus it is okay to obtain an `ARef<Device>` from a
+// `&Device`.
+unsafe impl AlwaysRefCounted for Device {}
 
 impl<Ctx: device::DeviceContext> AsRef<device::Device<Ctx>> for Device<Ctx> {
     fn as_ref(&self) -> &device::Device<Ctx> {

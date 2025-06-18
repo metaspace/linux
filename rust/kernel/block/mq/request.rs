@@ -8,6 +8,7 @@ use crate::{
     bindings,
     block::mq::Operations,
     error::Result,
+    sync::aref::RefCounted,
     types::{ARef, AlwaysRefCounted, Opaque},
 };
 use core::{
@@ -248,11 +249,10 @@ fn atomic_relaxed_op_unless(target: &AtomicU64, op: impl Fn(u64) -> u64, pred: u
         .is_ok()
 }
 
-// SAFETY: All instances of `Request<T>` are reference counted. This
-// implementation of `AlwaysRefCounted` ensure that increments to the ref count
-// keeps the object alive in memory at least until a matching reference count
-// decrement is executed.
-unsafe impl<T: Operations> AlwaysRefCounted for Request<T> {
+// SAFETY: All instances of `Request<T>` are reference counted. This implementation of `RefCounted`
+// ensure that increments to the ref count keeps the object alive in memory at least until a
+// matching reference count decrement is executed.
+unsafe impl<T: Operations> RefCounted for Request<T> {
     fn inc_ref(&self) {
         let refcount = &self.wrapper_ref().refcount();
 
@@ -282,3 +282,7 @@ unsafe impl<T: Operations> AlwaysRefCounted for Request<T> {
         }
     }
 }
+
+// SAFETY: We currently do not implement `Ownable`, thus it is okay to obtain an `ARef<Request>`
+// from a `&Request` (but this will change in the future).
+unsafe impl<T: Operations> AlwaysRefCounted for Request<T> {}
