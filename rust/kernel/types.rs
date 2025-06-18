@@ -11,6 +11,9 @@ use core::{
 };
 use pin_init::{PinInit, Wrapper, Zeroable};
 
+pub mod ownable;
+pub use ownable::{Ownable, OwnableMut, Owned};
+
 pub use crate::sync::aref::{ARef, AlwaysRefCounted};
 
 /// Used to transfer ownership to and from foreign (non-Rust) languages.
