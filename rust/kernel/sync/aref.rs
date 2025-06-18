@@ -15,6 +15,8 @@ use core::{marker::PhantomData, mem::ManuallyDrop, ops::Deref, ptr::NonNull};
 /// Note: Implementing this trait allows types to be wrapped in an [`ARef<Self>`]. It requires an
 /// internal reference count and provides only shared references. If unique references are required
 /// [`Ownable`] should be implemented which allows types to be wrapped in an [`Owned<Self>`].
+/// Implementing the trait [`OwnableRefCounted`] allows to convert between unique and shared
+/// references (i.e. [`Owned<Self>`] and [`ARef<Self>`]).
 ///
 /// # Safety
 ///
@@ -155,6 +157,12 @@ impl<T: AlwaysRefCounted> From<&T> for ARef<T> {
         b.inc_ref();
         // SAFETY: We just incremented the refcount above.
         unsafe { Self::from_raw(NonNull::from(b)) }
+    }
+}
+
+impl<T: crate::types::OwnableRefCounted> From<crate::types::Owned<T>> for ARef<T> {
+    fn from(b: crate::types::Owned<T>) -> Self {
+        T::into_shared(b)
     }
 }
 

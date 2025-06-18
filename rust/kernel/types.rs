@@ -12,7 +12,7 @@ use core::{
 use pin_init::{PinInit, Wrapper, Zeroable};
 
 pub mod ownable;
-pub use ownable::{Ownable, OwnableMut, Owned};
+pub use ownable::{Ownable, OwnableMut, OwnableRefCounted, Owned};
 
 pub use crate::sync::aref::{ARef, AlwaysRefCounted};
 
