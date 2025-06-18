@@ -10,6 +10,7 @@
 
 use crate::{
     bindings,
+    sync::aref::RefCounted,
     task::Kuid,
     types::{AlwaysRefCounted, Opaque},
 };
@@ -74,7 +75,7 @@ impl Credential {
 }
 
 // SAFETY: The type invariants guarantee that `Credential` is always ref-counted.
-unsafe impl AlwaysRefCounted for Credential {
+unsafe impl RefCounted for Credential {
     #[inline]
     fn inc_ref(&self) {
         // SAFETY: The existence of a shared reference means that the refcount is nonzero.
@@ -88,3 +89,7 @@ unsafe impl AlwaysRefCounted for Credential {
         unsafe { bindings::put_cred(obj.cast().as_ptr()) };
     }
 }
+
+// SAFETY: We do not implement `Ownable`, thus it is okay to obtain an `ARef<Credential>` from a
+// `&Credential`.
+unsafe impl AlwaysRefCounted for Credential {}
