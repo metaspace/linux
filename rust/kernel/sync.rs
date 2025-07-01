@@ -15,6 +15,7 @@ pub mod barrier;
 mod condvar;
 pub mod lock;
 mod locked_by;
+pub mod once_lock;
 pub mod poll;
 pub mod rcu;
 
