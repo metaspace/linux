@@ -95,18 +95,14 @@ impl<T> OnceLock<T> {
             false
         }
     }
-}
 
-impl<T: Copy> OnceLock<T> {
     /// Get a copy of the contained object.
     ///
     /// Returns [`None`] if the [`OnceLock`] is empty.
-    pub fn copy(&self) -> Option<T> {
-        if self.init.load(Acquire) == 2 {
-            // SAFETY: As determined by the load above, the object is ready for shared access.
-            Some(unsafe { *self.value.get() })
-        } else {
-            None
-        }
+    pub fn copy(&self) -> Option<T>
+    where
+        T: Copy,
+    {
+        self.as_ref().copied()
     }
 }
