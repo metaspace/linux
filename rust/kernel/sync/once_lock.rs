@@ -12,11 +12,11 @@ use kernel::types::Opaque;
 ///
 /// # Invariants
 ///
-/// `init` tracks the state of the container:
-///
-/// - If the container is empty, `init` is `0`.
-/// - If the container is mutably accessed, `init` is `1`.
-/// - If the container is populated and ready for shared access, `init` is `2`.
+/// - `init` may only increase in value.
+/// - `init` may only assume values in the range `0..=2`.
+/// - `init == 0` if and only if the container is empty.
+/// - `init == 1` if and only if being mutably accessed.
+/// - `init == 2` if and only if the container is populated and valid for shared access.
 ///
 /// # Example
 ///
@@ -51,7 +51,7 @@ impl<T> OnceLock<T> {
     ///
     /// The returned instance will be empty.
     pub const fn new() -> Self {
-        // INVARIANT: The container is empty and we set `init` to `0`.
+        // INVARIANT: The container is empty and we initialize `init` to `0`.
         Self {
             value: Opaque::uninit(),
             init: Atomic::new(0),
@@ -63,7 +63,8 @@ impl<T> OnceLock<T> {
     /// Returns [`None`] if this [`OnceLock`] is empty.
     pub fn as_ref(&self) -> Option<&T> {
         if self.init.load(Acquire) == 2 {
-            // SAFETY: As determined by the load above, the object is ready for shared access.
+            // SAFETY: By the type invariants of `Self`, `self.init == 2` means that `self.value`
+            // contains a valid value.
             Some(unsafe { &*self.value.get() })
         } else {
             None
@@ -74,13 +75,20 @@ impl<T> OnceLock<T> {
     ///
     /// Returns `true` if the [`OnceLock`] was successfully populated.
     pub fn populate(&self, value: T) -> bool {
-        // INVARIANT: We obtain exclusive access to the contained allocation and write 1 to
-        // `init`.
+        // INVARIANT: If the swap succeeds:
+        //  - We increase `init`.
+        //  - We write the valid value `1` to `init`.
+        //  - Only one thread can succeed in this write, so we have exclusive access after the
+        //    write.
         if let Ok(0) = self.init.cmpxchg(0, 1, Acquire) {
-            // SAFETY: We obtained exclusive access to the contained object.
+            // SAFETY: By the type invariants of `Self`, the fact that we succeeded in writing `1`
+            // to `self.init` means we obtained exclusive access to the contained object.
             unsafe { core::ptr::write(self.value.get(), value) };
-            // INVARIANT: We release our exclusive access and transition the object to shared
-            // access.
+            // INVARIANT:
+            //  - We increase `init`.
+            //  - We write the valid value `2` to `init`.
+            //  - We release our exclusive access to the contained object and the object is now
+            //    valid for shared access.
             self.init.store(2, Release);
             true
         } else {
