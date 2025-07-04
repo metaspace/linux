@@ -7,7 +7,7 @@
 use crate::prelude::*;
 use crate::str::BStr;
 use bindings;
-use kernel::sync::once_lock::OnceLock;
+use kernel::sync::OnceLock;
 
 /// Newtype to make `bindings::kernel_param` [`Sync`].
 #[repr(transparent)]

@@ -15,7 +15,7 @@ pub mod barrier;
 mod condvar;
 pub mod lock;
 mod locked_by;
-pub mod once_lock;
+mod once_lock;
 pub mod poll;
 pub mod rcu;
 
@@ -25,6 +25,7 @@ pub use lock::global::{global_lock, GlobalGuard, GlobalLock, GlobalLockBackend, 
 pub use lock::mutex::{new_mutex, Mutex, MutexGuard};
 pub use lock::spinlock::{new_spinlock, SpinLock, SpinLockGuard};
 pub use locked_by::LockedBy;
+pub use once_lock::OnceLock;
 
 /// Represents a lockdep class. It's a wrapper around C's `lock_class_key`.
 #[repr(transparent)]
