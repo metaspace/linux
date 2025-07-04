@@ -133,7 +133,7 @@ impl<T> ModuleParamAccess<T> {
     /// Get a shared reference to the parameter value.
     // Note: When sysfs access to parameters are enabled, we have to pass in a
     // held lock guard here.
-    pub fn get(&self) -> &T {
+    pub fn value(&self) -> &T {
         self.value.as_ref().unwrap_or(&self.default)
     }
 
