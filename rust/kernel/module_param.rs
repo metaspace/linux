@@ -141,7 +141,7 @@ impl<T> ModuleParamAccess<T> {
     ///
     /// NOTE: In most cases it is not safe deref the returned pointer.
     pub const fn as_void_ptr(&self) -> *mut c_void {
-        (self as *const Self).cast_mut().cast()
+        core::ptr::from_ref(self).cast_mut().cast()
     }
 }
 
