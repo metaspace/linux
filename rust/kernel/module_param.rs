@@ -28,14 +28,6 @@ unsafe impl Sync for RacyKernelParam {}
 /// Types that can be used for module parameters.
 // NOTE: This trait is `Copy` because drop could produce unsoundness during teardown.
 pub trait ModuleParam: Sized + Copy {
-    /// The [`ModuleParam`] will be used by the kernel module through this type.
-    ///
-    /// This may differ from `Self` if, for example, `Self` needs to track
-    /// ownership without exposing it or allocate extra space for other possible
-    /// parameter values.
-    // This is required to support string parameters in the future.
-    type Value: ?Sized;
-
     /// Parse a parameter argument into the parameter value.
     fn try_from_param_arg(arg: &BStr) -> Result<Self>;
 }
@@ -95,8 +87,6 @@ where
 macro_rules! impl_int_module_param {
     ($ty:ident) => {
         impl ModuleParam for $ty {
-            type Value = $ty;
-
             fn try_from_param_arg(arg: &BStr) -> Result<Self> {
                 <$ty as crate::str::parse_int::ParseInt>::from_str(arg)
             }
