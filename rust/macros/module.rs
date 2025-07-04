@@ -128,8 +128,8 @@ impl<'a> ModInfoBuilder<'a> {
                     #[link_section = \"__param\"]
                     #[used]
                     static __{module_name}_{param_name}_struct:
-                        ::kernel::module_param::RacyKernelParam =
-                        ::kernel::module_param::RacyKernelParam::new(
+                        ::kernel::module_param::KernelParam =
+                        ::kernel::module_param::KernelParam::new(
                           ::kernel::bindings::kernel_param {{
                             name: if cfg!(MODULE) {{
                                 ::kernel::c_str!(\"{param_name}\").as_bytes_with_nul()

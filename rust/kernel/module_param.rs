@@ -12,9 +12,9 @@ use kernel::sync::once_lock::OnceLock;
 /// Newtype to make `bindings::kernel_param` [`Sync`].
 #[repr(transparent)]
 #[doc(hidden)]
-pub struct RacyKernelParam(bindings::kernel_param);
+pub struct KernelParam(bindings::kernel_param);
 
-impl RacyKernelParam {
+impl KernelParam {
     #[doc(hidden)]
     pub const fn new(val: bindings::kernel_param) -> Self {
         Self(val)
@@ -23,7 +23,7 @@ impl RacyKernelParam {
 
 // SAFETY: C kernel handles serializing access to this type. We never access it
 // from Rust module.
-unsafe impl Sync for RacyKernelParam {}
+unsafe impl Sync for KernelParam {}
 
 /// Types that can be used for module parameters.
 // NOTE: This trait is `Copy` because drop could produce unsoundness during teardown.
