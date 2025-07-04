@@ -1,6 +1,7 @@
 //! A container that can be initialized at most once.
 
 use super::atomic::ordering::Acquire;
+use super::atomic::ordering::Relaxed;
 use super::atomic::ordering::Release;
 use super::atomic::Atomic;
 use core::ptr::drop_in_place;
@@ -81,7 +82,7 @@ impl<T> OnceLock<T> {
         //  - We write the valid value `1` to `init`.
         //  - Only one thread can succeed in this write, so we have exclusive access after the
         //    write.
-        if let Ok(0) = self.init.cmpxchg(0, 1, Acquire) {
+        if let Ok(0) = self.init.cmpxchg(0, 1, Relaxed) {
             // SAFETY: By the type invariants of `Self`, the fact that we succeeded in writing `1`
             // to `self.init` means we obtained exclusive access to the contained object.
             unsafe { core::ptr::write(self.value.get(), value) };
