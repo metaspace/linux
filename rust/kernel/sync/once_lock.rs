@@ -17,7 +17,7 @@ use kernel::types::Opaque;
 /// - `init` may only increase in value.
 /// - `init` may only assume values in the range `0..=2`.
 /// - `init == 0` if and only if the container is empty.
-/// - `init == 1` if and only if being mutably accessed.
+/// - `init == 1` if and only if being initialized.
 /// - `init == 2` if and only if the container is populated and valid for shared access.
 ///
 /// # Example
