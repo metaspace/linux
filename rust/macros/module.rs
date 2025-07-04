@@ -125,37 +125,39 @@ impl<'a> ModInfoBuilder<'a> {
                         ::kernel::module_param::ModuleParamAccess<{param_type}> =
                             ::kernel::module_param::ModuleParamAccess::new({param_default});
 
-                    #[link_section = \"__param\"]
-                    #[used]
-                    static __{module_name}_{param_name}_struct:
-                        ::kernel::module_param::KernelParam =
-                        ::kernel::module_param::KernelParam::new(
-                          ::kernel::bindings::kernel_param {{
-                            name: if cfg!(MODULE) {{
-                                ::kernel::c_str!(\"{param_name}\").as_bytes_with_nul()
-                            }} else {{
-                                ::kernel::c_str!(\"{module_name}.{param_name}\").as_bytes_with_nul()
-                            }}.as_ptr(),
-                            // SAFETY: `__this_module` is constructed by the kernel at load time
-                            // and will not be freed until the module is unloaded.
-                            #[cfg(MODULE)]
-                            mod_: unsafe {{
-                                (&::kernel::bindings::__this_module
-                                    as *const ::kernel::bindings::module)
-                                    .cast_mut()
-                            }},
-                            #[cfg(not(MODULE))]
-                            mod_: ::core::ptr::null_mut(),
-                            ops: &{ops} as *const ::kernel::bindings::kernel_param_ops,
-                            perm: 0, // Will not appear in sysfs
-                            level: -1,
-                            flags: 0,
-                            __bindgen_anon_1:
-                                ::kernel::bindings::kernel_param__bindgen_ty_1 {{
-                                    arg: {param_name}.as_void_ptr()
+                    const _: () = {{
+                        #[link_section = \"__param\"]
+                        #[used]
+                        static __{module_name}_{param_name}_struct:
+                            ::kernel::module_param::KernelParam =
+                            ::kernel::module_param::KernelParam::new(
+                            ::kernel::bindings::kernel_param {{
+                                name: if cfg!(MODULE) {{
+                                    ::kernel::c_str!(\"{param_name}\").as_bytes_with_nul()
+                                }} else {{
+                                    ::kernel::c_str!(\"{module_name}.{param_name}\").as_bytes_with_nul()
+                                }}.as_ptr(),
+                                // SAFETY: `__this_module` is constructed by the kernel at load time
+                                // and will not be freed until the module is unloaded.
+                                #[cfg(MODULE)]
+                                mod_: unsafe {{
+                                    (&::kernel::bindings::__this_module
+                                        as *const ::kernel::bindings::module)
+                                        .cast_mut()
                                 }},
-                          }}
-                        );
+                                #[cfg(not(MODULE))]
+                                mod_: ::core::ptr::null_mut(),
+                                ops: &{ops} as *const ::kernel::bindings::kernel_param_ops,
+                                perm: 0, // Will not appear in sysfs
+                                level: -1,
+                                flags: 0,
+                                __bindgen_anon_1:
+                                    ::kernel::bindings::kernel_param__bindgen_ty_1 {{
+                                        arg: {param_name}.as_void_ptr()
+                                    }},
+                            }}
+                            );
+                    }};
                 ",
                 module_name = info.name,
                 param_type = param.ptype,
