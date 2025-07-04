@@ -7,7 +7,7 @@
 use crate::prelude::*;
 use crate::str::BStr;
 use bindings;
-use kernel::sync::OnceLock;
+use kernel::sync::SetOnce;
 
 /// Newtype to make `bindings::kernel_param` [`Sync`].
 #[repr(transparent)]
@@ -75,7 +75,7 @@ where
         let new_value = T::try_from_param_arg(arg)?;
 
         // SAFETY: By function safety requirements, this access is safe.
-        let container = unsafe { &*((*param).__bindgen_anon_1.arg as *mut OnceLock<T>) };
+        let container = unsafe { &*((*param).__bindgen_anon_1.arg as *mut SetOnce<T>) };
 
         container
             .populate(new_value)
@@ -113,7 +113,7 @@ impl_int_module_param!(usize);
 /// Note: This type is `pub` because it is used by module crates to access
 /// parameter values.
 pub struct ModuleParamAccess<T> {
-    value: OnceLock<T>,
+    value: SetOnce<T>,
     default: T,
 }
 
@@ -125,7 +125,7 @@ impl<T> ModuleParamAccess<T> {
     #[doc(hidden)]
     pub const fn new(default: T) -> Self {
         Self {
-            value: OnceLock::new(),
+            value: SetOnce::new(),
             default,
         }
     }

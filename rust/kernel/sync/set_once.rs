@@ -9,7 +9,7 @@ use kernel::types::Opaque;
 
 /// A container that can be populated at most once. Thread safe.
 ///
-/// Once the a [`OnceLock`] is populated, it remains populated by the same object for the
+/// Once the a [`SetOnce`] is populated, it remains populated by the same object for the
 /// lifetime `Self`.
 ///
 /// # Invariants
@@ -23,8 +23,8 @@ use kernel::types::Opaque;
 /// # Example
 ///
 /// ```
-/// # use kernel::sync::once_lock::OnceLock;
-/// let value = OnceLock::new();
+/// # use kernel::sync::SetOnce;
+/// let value = SetOnce::new();
 /// assert_eq!(None, value.as_ref());
 ///
 /// let status = value.populate(42u8);
@@ -37,19 +37,21 @@ use kernel::types::Opaque;
 /// assert_eq!(Some(&42u8), value.as_ref());
 /// assert_eq!(Some(42u8), value.copy());
 /// ```
-pub struct OnceLock<T> {
+pub struct SetOnce<T> {
     init: Atomic<u32>,
     value: Opaque<T>,
 }
 
-impl<T> Default for OnceLock<T> {
+impl<T> Default for SetOnce<T> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<T> OnceLock<T> {
-    /// Create a new [`OnceLock`].
+// TODO: change names
+
+impl<T> SetOnce<T> {
+    /// Create a new [`SetOnce`].
     ///
     /// The returned instance will be empty.
     pub const fn new() -> Self {
@@ -62,7 +64,7 @@ impl<T> OnceLock<T> {
 
     /// Get a reference to the contained object.
     ///
-    /// Returns [`None`] if this [`OnceLock`] is empty.
+    /// Returns [`None`] if this [`SetOnce`] is empty.
     pub fn as_ref(&self) -> Option<&T> {
         if self.init.load(Acquire) == 2 {
             // SAFETY: By the type invariants of `Self`, `self.init == 2` means that `self.value`
@@ -73,9 +75,9 @@ impl<T> OnceLock<T> {
         }
     }
 
-    /// Populate the [`OnceLock`].
+    /// Populate the [`SetOnce`].
     ///
-    /// Returns `true` if the [`OnceLock`] was successfully populated.
+    /// Returns `true` if the [`SetOnce`] was successfully populated.
     pub fn populate(&self, value: T) -> bool {
         // INVARIANT: If the swap succeeds:
         //  - We increase `init`.
@@ -100,7 +102,7 @@ impl<T> OnceLock<T> {
 
     /// Get a copy of the contained object.
     ///
-    /// Returns [`None`] if the [`OnceLock`] is empty.
+    /// Returns [`None`] if the [`SetOnce`] is empty.
     pub fn copy(&self) -> Option<T>
     where
         T: Copy,
@@ -109,7 +111,7 @@ impl<T> OnceLock<T> {
     }
 }
 
-impl<T> Drop for OnceLock<T> {
+impl<T> Drop for SetOnce<T> {
     fn drop(&mut self) {
         if self.init.load(Acquire) == 2 {
             // SAFETY: By the type invariants of `Self`, `self.init == 2` means that `self.value`
