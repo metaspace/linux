@@ -3,6 +3,7 @@
 use super::atomic::ordering::Acquire;
 use super::atomic::ordering::Release;
 use super::atomic::Atomic;
+use core::ptr::drop_in_place;
 use kernel::types::Opaque;
 
 /// A container that can be populated at most once. Thread safe.
@@ -104,5 +105,16 @@ impl<T> OnceLock<T> {
         T: Copy,
     {
         self.as_ref().copied()
+    }
+}
+
+impl<T> Drop for OnceLock<T> {
+    fn drop(&mut self) {
+        if self.init.load(Acquire) == 2 {
+            // SAFETY: By the type invariants of `Self`, `self.init == 2` means that `self.value`
+            // contains a valid value. We have exclusive access, as we hold a `mut` reference to
+            // `self`.
+            unsafe { drop_in_place(self.value.get()) };
+        }
     }
 }
