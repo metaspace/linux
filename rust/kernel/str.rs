@@ -4,6 +4,7 @@
 
 use crate::{
     alloc::{flags::*, AllocError, KVec},
+    error::Result,
     fmt::{self, Write},
     prelude::*,
 };
@@ -918,6 +919,62 @@ impl Write for NullTerminatedFormatter<'_> {
 
         Ok(())
     }
+}
+
+/// Convert common user inputs into boolean values using the kernel's `kstrtobool` function.
+///
+/// This routine returns `Ok(bool)` if the first character is one of 'YyTt1NnFf0', or
+/// \[oO\]\[NnFf\] for "on" and "off". Otherwise it will return `Err(EINVAL)`.
+///
+/// # Examples
+///
+/// ```
+/// # use kernel::{c_str, str::kstrtobool};
+///
+/// // Lowercase
+/// assert_eq!(kstrtobool(c_str!("true")), Ok(true));
+/// assert_eq!(kstrtobool(c_str!("tr")), Ok(true));
+/// assert_eq!(kstrtobool(c_str!("t")), Ok(true));
+/// assert_eq!(kstrtobool(c_str!("twrong")), Ok(true));
+/// assert_eq!(kstrtobool(c_str!("false")), Ok(false));
+/// assert_eq!(kstrtobool(c_str!("f")), Ok(false));
+/// assert_eq!(kstrtobool(c_str!("yes")), Ok(true));
+/// assert_eq!(kstrtobool(c_str!("no")), Ok(false));
+/// assert_eq!(kstrtobool(c_str!("on")), Ok(true));
+/// assert_eq!(kstrtobool(c_str!("off")), Ok(false));
+///
+/// // Camel case
+/// assert_eq!(kstrtobool(c_str!("True")), Ok(true));
+/// assert_eq!(kstrtobool(c_str!("False")), Ok(false));
+/// assert_eq!(kstrtobool(c_str!("Yes")), Ok(true));
+/// assert_eq!(kstrtobool(c_str!("No")), Ok(false));
+/// assert_eq!(kstrtobool(c_str!("On")), Ok(true));
+/// assert_eq!(kstrtobool(c_str!("Off")), Ok(false));
+///
+/// // All caps
+/// assert_eq!(kstrtobool(c_str!("TRUE")), Ok(true));
+/// assert_eq!(kstrtobool(c_str!("FALSE")), Ok(false));
+/// assert_eq!(kstrtobool(c_str!("YES")), Ok(true));
+/// assert_eq!(kstrtobool(c_str!("NO")), Ok(false));
+/// assert_eq!(kstrtobool(c_str!("ON")), Ok(true));
+/// assert_eq!(kstrtobool(c_str!("OFF")), Ok(false));
+///
+/// // Numeric
+/// assert_eq!(kstrtobool(c_str!("1")), Ok(true));
+/// assert_eq!(kstrtobool(c_str!("0")), Ok(false));
+///
+/// // Invalid input
+/// assert_eq!(kstrtobool(c_str!("invalid")), Err(EINVAL));
+/// assert_eq!(kstrtobool(c_str!("2")), Err(EINVAL));
+/// ```
+pub fn kstrtobool(string: &CStr) -> Result<bool> {
+    let mut result: bool = false;
+
+    // SAFETY: `string` is a valid null-terminated C string, and `result` is a valid
+    // pointer to a bool that we own.
+    let ret = unsafe { bindings::kstrtobool(string.as_char_ptr(), &mut result) };
+
+    kernel::error::to_result(ret).map(|()| result)
 }
 
 /// An owned string that is guaranteed to have exactly one `NUL` byte, which is at the end.
