@@ -921,6 +921,20 @@ impl Write for NullTerminatedFormatter<'_> {
     }
 }
 
+/// # Safety
+///
+/// - `string` must point to a null terminated string that is valid for read.
+unsafe fn kstrtobool_raw(string: *const u8) -> Result<bool> {
+    let mut result: bool = false;
+
+    // SAFETY:
+    // - By function safety requirement, `string` is a valid null-terminated string.
+    // - `result` is a valid `bool` that we own.
+    let ret = unsafe { bindings::kstrtobool(string, &mut result) };
+
+    kernel::error::to_result(ret).map(|()| result)
+}
+
 /// Convert common user inputs into boolean values using the kernel's `kstrtobool` function.
 ///
 /// This routine returns `Ok(bool)` if the first character is one of 'YyTt1NnFf0', or
@@ -968,13 +982,22 @@ impl Write for NullTerminatedFormatter<'_> {
 /// assert_eq!(kstrtobool(c_str!("2")), Err(EINVAL));
 /// ```
 pub fn kstrtobool(string: &CStr) -> Result<bool> {
-    let mut result: bool = false;
+    // SAFETY:
+    // - The pointer returned by `CStr::as_char_ptr` is guaranteed to be
+    //   null terminated.
+    // - `string` is live and thus the string is valid for read.
+    unsafe { kstrtobool_raw(string.as_char_ptr()) }
+}
 
-    // SAFETY: `string` is a valid null-terminated C string, and `result` is a valid
-    // pointer to a bool that we own.
-    let ret = unsafe { bindings::kstrtobool(string.as_char_ptr(), &mut result) };
-
-    kernel::error::to_result(ret).map(|()| result)
+/// Convert `&[u8]` to `bool` by deferring to [`kernel::str::kstrtobool`].
+///
+/// Only considers at most the first two bytes of `bytes`.
+pub fn kstrtobool_bytes(bytes: &[u8]) -> Result<bool> {
+    // `ktostrbool` only considers the first two bytes of the input.
+    let stack_string = [*bytes.first().unwrap_or(&0), *bytes.get(1).unwrap_or(&0), 0];
+    // SAFETY: `stack_string` is null terminated and it is live on the stack so
+    // it is valid for read.
+    unsafe { kstrtobool_raw(stack_string.as_ptr()) }
 }
 
 /// An owned string that is guaranteed to have exactly one `NUL` byte, which is at the end.
