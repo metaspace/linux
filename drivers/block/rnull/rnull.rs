@@ -68,7 +68,13 @@ impl NullBlkDevice {
         completion_time: Delta,
         memory_backed: bool,
     ) -> Result<GenDisk<Self>> {
-        let tagset = Arc::pin_init(TagSet::new(1, 256, 1, mq::Flags::default()), GFP_KERNEL)?;
+        let flags = if memory_backed {
+            mq::Flags::BLOCKING
+        } else {
+            mq::Flags::default()
+        };
+
+        let tagset = Arc::pin_init(TagSet::new(1, 256, 1, flags), GFP_KERNEL)?;
 
         let queue_data = Box::pin_init(
             pin_init!(
