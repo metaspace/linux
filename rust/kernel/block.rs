@@ -2,6 +2,7 @@
 
 //! Types for working with the block layer.
 
+pub mod badblocks;
 pub mod bio;
 pub mod mq;
 
