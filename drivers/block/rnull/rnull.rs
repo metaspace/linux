@@ -85,6 +85,10 @@ module! {
             default: 0,
             description: "Support discard operations (requires memory-backed null_blk device). Default: false",
         },
+        no_sched: u8 {
+            default: 0,
+            description: "No IO scheduler",
+        },
     },
 }
 
@@ -124,6 +128,7 @@ impl kernel::InPlaceModule for NullBlkModule {
                     submit_queues,
                     *module_parameters::home_node.value(),
                     *module_parameters::discard.value() != 0,
+                    *module_parameters::no_sched.value() != 0,
                     false,
                 )?;
                 disks.push(disk, GFP_KERNEL)?;
@@ -153,13 +158,18 @@ impl NullBlkDevice {
         submit_queues: u32,
         home_node: i32,
         discard: bool,
+        no_sched: bool,
         outer_lock: bool,
     ) -> Result<GenDisk<Self>> {
-        let flags = if memory_backed {
-            mq::Flags::BLOCKING
-        } else {
-            mq::Flags::default()
-        };
+        let mut flags = mq::Flags::default();
+
+        if memory_backed {
+            flags |= mq::Flags::BLOCKING;
+        }
+
+        if no_sched {
+            flags |= mq::Flags::NO_DEFAULT_SCHEDULER;
+        }
 
         if home_node > kernel::num_online_nodes().try_into()? {
             return Err(code::EINVAL);

@@ -71,6 +71,7 @@ impl configfs::GroupOperations for Config {
                 use_per_node_hctx: 8,
                 home_node: 9,
                 discard: 10,
+                no_sched:11,
                 outer_lock: 100,
             ],
         };
@@ -93,6 +94,7 @@ impl configfs::GroupOperations for Config {
                     submit_queues: 1,
                     home_node: bindings::NUMA_NO_NODE,
                     discard: false,
+                    no_sched: false,
                     outer_lock: false,
                 }),
             }),
@@ -151,6 +153,7 @@ struct DeviceConfigInner {
     submit_queues: u32,
     home_node: i32,
     discard: bool,
+    no_sched: bool,
     outer_lock: bool,
 }
 
@@ -186,6 +189,7 @@ impl configfs::AttributeOperations<0> for DeviceConfig {
                 guard.submit_queues,
                 guard.home_node,
                 guard.discard,
+                guard.no_sched,
                 guard.outer_lock,
             )?);
             guard.powered = true;
@@ -471,6 +475,33 @@ impl configfs::AttributeOperations<10> for DeviceConfig {
         }
 
         this.data.lock().discard = kstrtobool_bytes(page)?;
+
+        Ok(())
+    }
+}
+
+#[vtable]
+impl configfs::AttributeOperations<11> for DeviceConfig {
+    type Data = DeviceConfig;
+
+    fn show(this: &DeviceConfig, page: &mut [u8; PAGE_SIZE]) -> Result<usize> {
+        let mut writer = kernel::str::Formatter::new(page);
+
+        if this.data.lock().no_sched {
+            writer.write_str("1\n")?;
+        } else {
+            writer.write_str("0\n")?;
+        }
+
+        Ok(writer.bytes_written())
+    }
+
+    fn store(this: &DeviceConfig, page: &[u8]) -> Result {
+        if this.data.lock().powered {
+            return Err(EBUSY);
+        }
+
+        this.data.lock().no_sched = kstrtobool_bytes(page)?;
 
         Ok(())
     }
