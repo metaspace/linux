@@ -25,6 +25,7 @@ pub struct GenDiskBuilder {
     logical_block_size: u32,
     physical_block_size: u32,
     capacity_sectors: u64,
+    max_hw_discard_sectors: u32,
 }
 
 impl Default for GenDiskBuilder {
@@ -34,6 +35,7 @@ impl Default for GenDiskBuilder {
             logical_block_size: bindings::PAGE_SIZE as u32,
             physical_block_size: bindings::PAGE_SIZE as u32,
             capacity_sectors: 0,
+            max_hw_discard_sectors: 0,
         }
     }
 }
@@ -94,6 +96,16 @@ impl GenDiskBuilder {
         self
     }
 
+    /// Set the maximum amount of sectors the underlying hardware device can
+    /// discard/trim in a single operation.
+    ///
+    /// Setting 0 (default) here will cause the disk to report discard not
+    /// supported.
+    pub fn max_hw_discard_sectors(mut self, max_hw_discard_sectors: u32) -> Self {
+        self.max_hw_discard_sectors = max_hw_discard_sectors;
+        self
+    }
+
     /// Build a new `GenDisk` and add it to the VFS.
     pub fn build<T: Operations>(
         self,
@@ -112,6 +124,7 @@ impl GenDiskBuilder {
 
         lim.logical_block_size = self.logical_block_size;
         lim.physical_block_size = self.physical_block_size;
+        lim.max_hw_discard_sectors = self.max_hw_discard_sectors;
         if self.rotational {
             lim.features = bindings::BLK_FEAT_ROTATIONAL;
         }
