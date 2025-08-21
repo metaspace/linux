@@ -124,6 +124,7 @@ impl kernel::InPlaceModule for NullBlkModule {
                     submit_queues,
                     *module_parameters::home_node.value(),
                     *module_parameters::discard.value() != 0,
+                    false,
                 )?;
                 disks.push(disk, GFP_KERNEL)?;
             }
@@ -152,6 +153,7 @@ impl NullBlkDevice {
         submit_queues: u32,
         home_node: i32,
         discard: bool,
+        outer_lock: bool,
     ) -> Result<GenDisk<Self>> {
         let flags = if memory_backed {
             mq::Flags::BLOCKING
@@ -176,6 +178,7 @@ impl NullBlkDevice {
                 completion_time,
                 memory_backed,
                 block_size: block_size as usize,
+                outer_lock,
             }),
             GFP_KERNEL,
         )?;
@@ -365,6 +368,7 @@ struct QueueData {
     completion_time: Delta,
     memory_backed: bool,
     block_size: usize,
+    outer_lock: bool,
 }
 
 #[pin_data]
@@ -410,7 +414,12 @@ impl Operations for NullBlkDevice {
         _is_last: bool,
     ) -> Result {
         if queue_data.memory_backed {
-            //let guard = queue_data.tree.lock.lock();
+            let outer_guard = if queue_data.outer_lock {
+                Some(queue_data.tree.lock.lock())
+            } else {
+                None
+            };
+
             let tree = queue_data.tree.tree.deref();
             let command = rq.command();
             let mut sector = rq.sector();
@@ -430,8 +439,7 @@ impl Operations for NullBlkDevice {
             }
 
             drop(guard);
-
-            //drop(guard);
+            drop(outer_guard);
         }
 
         match queue_data.irq_mode {
