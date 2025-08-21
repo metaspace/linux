@@ -2,6 +2,7 @@
 
 //! Owned reference types.
 
+use crate::prelude::*;
 use core::{
     marker::PhantomData,
     mem::ManuallyDrop,
