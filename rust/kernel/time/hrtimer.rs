@@ -160,7 +160,7 @@ impl<T> HrTimer<T> {
     /// # Safety
     ///
     /// `this` must point to a valid `Self`.
-    pub(crate) unsafe fn raw_cancel(this: *const Self) -> bool {
+    pub unsafe fn raw_cancel(this: *const Self) -> bool {
         // SAFETY: `this` points to an allocation of at least `HrTimer` size.
         let c_timer_ptr = unsafe { HrTimer::raw_get(this) };
 
@@ -514,7 +514,8 @@ pub enum HrTimerRestart {
 }
 
 impl HrTimerRestart {
-    fn into_c(self) -> bindings::hrtimer_restart {
+    /// Convert `self` into an integer for FFI use.
+    pub fn into_c(self) -> bindings::hrtimer_restart {
         self as bindings::hrtimer_restart
     }
 }
