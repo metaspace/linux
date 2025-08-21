@@ -8,7 +8,7 @@ use crate::{
     alloc, bindings, build_assert,
     error::{Error, Result},
     ffi::c_void,
-    types::{ForeignOwnable, NotThreadSafe, Opaque},
+    types::{ForeignOwnable, NotThreadSafe, Opaque, ScopeGuard},
 };
 use core::{iter, marker::PhantomData, pin::Pin, ptr::NonNull};
 use pin_init::{pin_data, pin_init, pinned_drop, PinInit};
@@ -265,6 +265,47 @@ impl<'a, T: ForeignOwnable> Guard<'a, T> {
             // API; such entries present as `NULL`.
             Ok(unsafe { T::try_from_foreign(old) })
         }
+    }
+
+    /// Execute a closure with the XArray lock temporarily released.
+    ///
+    /// This method temporarily unlocks the XArray, executes the provided closure,
+    /// and then re-locks the XArray before returning. This is useful when you need
+    /// to perform operations that might sleep or take other locks while holding
+    /// an XArray lock.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// # use kernel::xarray::{self, XArray};
+    /// # use kernel::prelude::*;
+    /// # use kernel::page::Page;
+    /// # fn example() -> Result {
+    /// let mut xa = KBox::pin_init(XArray::new(xarray::AllocKind::Alloc), GFP_KERNEL)?;
+    /// let mut locked = xa.lock();
+    ///
+    /// // Temporarily unlock to perform some operation that might sleep
+    /// let data = locked.do_unlocked(|| {
+    ///     // Perform operations that require the lock to be released, for example allocating:
+    //      KBox::new(42, GFP_KERNEL)
+    /// });
+    /// // Lock is automatically re-acquired here
+    ///
+    ///  locked.store(0, data, GFP_KERNEL)?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn do_unlocked<U>(&mut self, cb: impl FnOnce() -> U) -> U {
+        // SAFETY:
+        // - `self.xa.xa` is always valid by the type invariant.
+        // - The caller holds the lock, so it is safe to unlock it.
+        unsafe { bindings::xa_unlock(self.xa.xa.get()) };
+
+        let _relock = ScopeGuard::new(||
+                // SAFETY: The lock was just unlocked above and is being relocked now.
+                unsafe {bindings::xa_lock(self.xa.xa.get()) });
+
+        cb()
     }
 }
 
