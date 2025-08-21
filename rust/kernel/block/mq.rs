@@ -57,7 +57,7 @@
 //!
 //! ```rust
 //! use kernel::{
-//!     block::mq::*,
+//!     block::mq::{self, *},
 //!     new_mutex,
 //!     prelude::*,
 //!     sync::{aref::ARef, Arc, Mutex},
@@ -92,7 +92,7 @@
 //! }
 //!
 //! let tagset: Arc<TagSet<MyBlkDevice>> =
-//!     Arc::pin_init(TagSet::new(1, 256, 1), GFP_KERNEL)?;
+//!     Arc::pin_init(TagSet::new(1, 256, 1, mq::tag_set::Flags::default()), GFP_KERNEL)?;
 //! let mut disk = gen_disk::GenDiskBuilder::new()
 //!     .capacity_sectors(4096)
 //!     .build(fmt!("myblk"), tagset, ())?;
@@ -103,7 +103,7 @@
 pub mod gen_disk;
 mod operations;
 mod request;
-mod tag_set;
+pub mod tag_set;
 
 pub use operations::Operations;
 pub use request::Request;
