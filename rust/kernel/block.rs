@@ -4,6 +4,7 @@
 
 pub mod bio;
 pub mod mq;
+pub mod badblocks;
 
 /// Bit mask for masking out [`SECTOR_SIZE`].
 pub const SECTOR_MASK: u32 = bindings::SECTOR_MASK;
