@@ -128,7 +128,7 @@ impl<T: Ownable> Deref for Owned<T> {
     }
 }
 
-impl<T: OwnableMut> DerefMut for Owned<T> {
+impl<T: OwnableMut + Unpin> DerefMut for Owned<T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         // SAFETY: The type invariants guarantee that the object is valid, and that we can safely
         // return a mutable reference to it.
