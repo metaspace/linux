@@ -15,5 +15,9 @@ impl_flags! {
         /// processing IO. When this flag is not set, IO is processed in atomic
         /// context. When this flag is set, IO is processed in process context.
         Blocking = bindings::BLK_MQ_F_BLOCKING,
+
+        /// Select 'none' during queue registration in case of a single hwq or shared
+        /// hwqs instead of 'mq-deadline'.
+        NoDefaultScheduler = bindings::BLK_MQ_F_NO_SCHED_BY_DEFAULT,
     }
 }
