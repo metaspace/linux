@@ -94,6 +94,7 @@ impl configfs::GroupOperations for Config {
                 submit_queues: 7,
                 use_per_node_hctx: 8,
                 home_node: 9,
+                discard: 10,
             ],
         };
 
@@ -114,6 +115,7 @@ impl configfs::GroupOperations for Config {
                     memory_backed: false,
                     submit_queues: 1,
                     home_node: bindings::NUMA_NO_NODE,
+                    discard: false,
                 }),
             }),
             core::iter::empty(),
@@ -171,6 +173,7 @@ struct DeviceConfigInner {
     memory_backed: bool,
     submit_queues: u32,
     home_node: i32,
+    discard: bool,
 }
 
 #[vtable]
@@ -204,6 +207,7 @@ impl configfs::AttributeOperations<0> for DeviceConfig {
                 memory_backed: guard.memory_backed,
                 submit_queues: guard.submit_queues,
                 home_node: guard.home_node,
+                discard: guard.discard,
             })?);
             guard.powered = true;
         } else if guard.powered && !power_op {
@@ -320,4 +324,15 @@ configfs_simple_field!(
             Ok(())
         }
     }
+);
+
+configfs_attribute!(DeviceConfig, 10,
+    show: |this, page| show_field(this.data.lock().discard, page),
+    store: |this, page| store_with_power_check(this, page, |this, page| {
+        if !this.data.lock().memory_backed {
+            return Err(EINVAL);
+        }
+        this.data.lock().discard = kstrtobool_bytes(page)?;
+        Ok(())
+    })
 );
