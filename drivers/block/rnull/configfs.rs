@@ -41,7 +41,7 @@ impl AttributeOperations<0> for Config {
         let mut writer = kernel::str::Formatter::new(page);
         writer.write_str(
             "blocksize,size,rotational,irqmode,completion_nsec,memory_backed\
-             submit_queues,use_per_node_hctx\n",
+             submit_queues,use_per_node_hctx,discard\n",
         )?;
         Ok(writer.bytes_written())
     }
@@ -70,6 +70,7 @@ impl configfs::GroupOperations for Config {
                 submit_queues: 7,
                 use_per_node_hctx: 8,
                 home_node: 9,
+                discard: 10,
             ],
         };
 
@@ -90,6 +91,7 @@ impl configfs::GroupOperations for Config {
                     memory_backed: false,
                     submit_queues: 1,
                     home_node: bindings::NUMA_NO_NODE,
+                    discard: false,
                 }),
             }),
         ))
@@ -146,6 +148,7 @@ struct DeviceConfigInner {
     memory_backed: bool,
     submit_queues: u32,
     home_node: i32,
+    discard: bool,
 }
 
 #[vtable]
@@ -179,6 +182,7 @@ impl configfs::AttributeOperations<0> for DeviceConfig {
                 guard.memory_backed,
                 guard.submit_queues,
                 guard.home_node,
+                guard.discard,
             )?);
             guard.powered = true;
         } else if guard.powered && !power_op {
@@ -335,11 +339,10 @@ impl configfs::AttributeOperations<6> for DeviceConfig {
             return Err(EBUSY);
         }
 
-        this.data.lock().memory_backed = core::str::from_utf8(page)?
-            .trim()
-            .parse::<u8>()
-            .map_err(|_| kernel::error::code::EINVAL)?
-            != 0;
+        let value = kstrtobool_bytes(page)?;
+
+        this.data.lock().discard &= value;
+        this.data.lock().memory_backed = value;
 
         Ok(())
     }
@@ -434,6 +437,37 @@ impl configfs::AttributeOperations<9> for DeviceConfig {
         }
 
         this.data.lock().home_node = value;
+        Ok(())
+    }
+}
+
+#[vtable]
+impl configfs::AttributeOperations<10> for DeviceConfig {
+    type Data = DeviceConfig;
+
+    fn show(this: &DeviceConfig, page: &mut [u8; PAGE_SIZE]) -> Result<usize> {
+        let mut writer = kernel::str::Formatter::new(page);
+
+        if this.data.lock().discard {
+            writer.write_str("1\n")?;
+        } else {
+            writer.write_str("0\n")?;
+        }
+
+        Ok(writer.bytes_written())
+    }
+
+    fn store(this: &DeviceConfig, page: &[u8]) -> Result {
+        if this.data.lock().powered {
+            return Err(EBUSY);
+        }
+
+        if !this.data.lock().memory_backed {
+            return Err(EINVAL);
+        }
+
+        this.data.lock().discard = kstrtobool_bytes(page)?;
+
         Ok(())
     }
 }
