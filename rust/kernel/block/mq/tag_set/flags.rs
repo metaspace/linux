@@ -13,8 +13,8 @@ impl Flags {
     /// context. When this flag is set, IO is processed in process context.
     pub const BLOCKING: Flags = Flags::new(bindings::BLK_MQ_F_BLOCKING);
 
-    // Select 'none' during queue registration in case of a single hwq or shared
-    // hwqs instead of 'mq-deadline'.
+    /// Select 'none' during queue registration in case of a single hwq or shared
+    /// hwqs instead of 'mq-deadline'.
     pub const NO_DEFAULT_SCHEDULER: Flags = Flags::new(bindings::BLK_MQ_F_NO_SCHED_BY_DEFAULT);
 
     pub(crate) fn into_inner(self) -> c_uint {
@@ -43,6 +43,18 @@ impl core::ops::BitAnd for Flags {
     type Output = Self;
     fn bitand(self, rhs: Self) -> Self::Output {
         Self(self.0 & rhs.0)
+    }
+}
+
+impl core::ops::BitOrAssign for Flags {
+    fn bitor_assign(&mut self, rhs: Self) {
+        self.0 |= rhs.0;
+    }
+}
+
+impl core::ops::BitAndAssign for Flags {
+    fn bitand_assign(&mut self, rhs: Self) {
+        self.0 &= rhs.0;
     }
 }
 
