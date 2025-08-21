@@ -106,6 +106,17 @@ impl<T: Ownable> Owned<T> {
     pub fn into_raw(me: Self) -> NonNull<T> {
         ManuallyDrop::new(me).ptr
     }
+
+    /// Get a pinned mutable reference to the data owned by this `Owned<T>`.
+    pub fn get_pin_mut(&mut self) -> Pin<&mut T> {
+        // SAFETY: The type invariants guarantee that the object is valid, and that we can safely
+        // return a mutable reference to it.
+        let unpinned = unsafe { self.ptr.as_mut() };
+
+        // SAFETY: We never hand out unpinned mutable references to the data in
+        // `Self`, unless the contained type is `Unpin`.
+        unsafe { Pin::new_unchecked(unpinned) }
+    }
 }
 
 impl<T: Ownable> Deref for Owned<T> {
