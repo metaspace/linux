@@ -6,9 +6,12 @@ use super::{
 };
 use kernel::{
     bindings,
-    block::mq::gen_disk::{
-        GenDisk,
-        GenDiskBuilder, //
+    block::{
+        badblocks::BadBlocks,
+        mq::gen_disk::{
+            GenDisk,
+            GenDiskBuilder, //
+        }, //
     },
     c_str,
     configfs::{
@@ -27,7 +30,10 @@ use kernel::{
         kstrtobool_bytes,
         CString, //
     },
-    sync::Mutex,
+    sync::{
+        Arc,
+        Mutex, //
+    },
     time, //
 };
 use macros::{
@@ -96,6 +102,7 @@ impl configfs::GroupOperations for Config {
                 home_node: 9,
                 discard: 10,
                 no_sched:11,
+                badblocks: 12,
             ],
         };
 
@@ -118,6 +125,7 @@ impl configfs::GroupOperations for Config {
                     home_node: bindings::NUMA_NO_NODE,
                     discard: false,
                     no_sched: false,
+                    bad_blocks: Arc::pin_init(BadBlocks::new(false), GFP_KERNEL)?,
                 }),
             }),
             core::iter::empty(),
@@ -177,6 +185,7 @@ struct DeviceConfigInner {
     home_node: i32,
     discard: bool,
     no_sched: bool,
+    bad_blocks: Arc<BadBlocks>,
 }
 
 #[vtable]
@@ -212,6 +221,7 @@ impl configfs::AttributeOperations<0> for DeviceConfig {
                 home_node: guard.home_node,
                 discard: guard.discard,
                 no_sched: guard.no_sched,
+                bad_blocks: guard.bad_blocks.clone(),
             })?);
             guard.powered = true;
         } else if guard.powered && !power_op {
@@ -363,6 +373,51 @@ impl configfs::AttributeOperations<11> for DeviceConfig {
         }
 
         this.data.lock().no_sched = kstrtobool_bytes(page)?;
+
+        Ok(())
+    }
+}
+
+#[vtable]
+impl configfs::AttributeOperations<12> for DeviceConfig {
+    type Data = DeviceConfig;
+
+    fn show(this: &DeviceConfig, page: &mut [u8; PAGE_SIZE]) -> Result<usize> {
+        let ret = this.data.lock().bad_blocks.show(page, false);
+        if ret < 0 {
+            Err(Error::from_errno(ret as c_int))
+        } else {
+            Ok(ret as usize)
+        }
+    }
+
+    fn store(this: &DeviceConfig, page: &[u8]) -> Result {
+        // This attribute can be set while device is powered.
+
+        for line in core::str::from_utf8(page)?.lines() {
+            let mut chars = line.chars();
+            match chars.next() {
+                Some(sign @ '+' | sign @ '-') => {
+                    if let Some((start, end)) = chars.as_str().split_once('-') {
+                        let start: u64 = start.parse().map_err(|_| EINVAL)?;
+                        let end: u64 = end.parse().map_err(|_| EINVAL)?;
+
+                        if start > end {
+                            return Err(EINVAL);
+                        }
+
+                        this.data.lock().bad_blocks.enable();
+
+                        if sign == '+' {
+                            this.data.lock().bad_blocks.set_bad(start..=end, true)?;
+                        } else {
+                            this.data.lock().bad_blocks.set_good(start..=end)?;
+                        }
+                    }
+                }
+                _ => return Err(EINVAL),
+            }
+        }
 
         Ok(())
     }
