@@ -297,13 +297,18 @@ impl<T: Operations> Owned<Request<T>> {
 
     /// Notify the block layer that the request has been completed without errors.
     pub fn end_ok(self) {
+        self.end(bindings::BLK_STS_OK)
+    }
+
+    /// Notify the block layer that the request has been completed.
+    pub fn end(self, status: u8) {
         let request_ptr = self.0.get().cast();
         core::mem::forget(self);
         // SAFETY: By type invariant, `this.0` was a valid `struct request`. The
         // existence of `self` guarantees that there are no `ARef`s pointing to
         // this request. Therefore it is safe to hand it back to the block
         // layer.
-        unsafe { bindings::blk_mq_end_request(request_ptr, bindings::BLK_STS_OK) };
+        unsafe { bindings::blk_mq_end_request(request_ptr, status) };
     }
 }
 
