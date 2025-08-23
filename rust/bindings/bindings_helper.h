@@ -155,3 +155,6 @@ const vm_flags_t RUST_CONST_HELPER_VM_NOHUGEPAGE = VM_NOHUGEPAGE;
 #include "../../drivers/android/binder/rust_binder_events.h"
 #include "../../drivers/android/binder/page_range_helper.h"
 #endif
+
+const blk_status_t RUST_CONST_HELPER_BLK_STS_IOERR = BLK_STS_IOERR;
+
