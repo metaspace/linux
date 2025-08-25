@@ -161,6 +161,7 @@ impl kernel::InPlaceModule for NullBlkModule {
                     discard: *module_parameters::discard.value() != 0,
                     no_sched: *module_parameters::no_sched.value() != 0,
                     bad_blocks: Arc::pin_init(BadBlocks::new(false), GFP_KERNEL)?,
+                    bad_blocks_once: false,
                 })?;
                 disks.push(disk, GFP_KERNEL)?;
             }
@@ -188,6 +189,7 @@ struct NullBlkOptions<'a> {
     discard: bool,
     no_sched: bool,
     bad_blocks: Arc<BadBlocks>,
+    bad_blocks_once: bool,
 }
 struct NullBlkDevice;
 
@@ -206,6 +208,7 @@ impl NullBlkDevice {
             discard,
             no_sched,
             bad_blocks,
+            bad_blocks_once,
         } = options;
 
         let mut flags = mq::tag_set::Flags::default();
@@ -235,6 +238,7 @@ impl NullBlkDevice {
                 memory_backed,
                 block_size: block_size.into(),
                 bad_blocks,
+                bad_blocks_once,
             }),
             GFP_KERNEL,
         )?;
@@ -393,6 +397,7 @@ struct QueueData {
     memory_backed: bool,
     block_size: u64,
     bad_blocks: Arc<BadBlocks>,
+    bad_blocks_once: bool,
 }
 
 #[pin_data]
@@ -442,12 +447,16 @@ impl Operations for NullBlkDevice {
         if queue_data.bad_blocks.enabled() {
             let start = rq.sector();
             let end = start + u64::from(rq.sectors());
-            if !matches!(
-                queue_data.bad_blocks.check(start..end),
-                badblocks::BlockStatus::None
-            ) {
-                rq.data_ref().error.store(1, ordering::Relaxed);
-            }
+            match queue_data.bad_blocks.check(start..end) {
+                badblocks::BlockStatus::None => {}
+                badblocks::BlockStatus::Acknowledged(range)
+                | badblocks::BlockStatus::Unacknowledged(range) => {
+                    rq.data_ref().error.store(1, ordering::Relaxed);
+                    if queue_data.bad_blocks_once {
+                        queue_data.bad_blocks.set_good(range)?;
+                    }
+                }
+            };
         }
 
         // TODO: Skip IO if bad block.
