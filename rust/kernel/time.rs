@@ -482,3 +482,9 @@ impl Delta {
         }
     }
 }
+
+impl core::fmt::Display for Delta {
+    fn fmt(&self, f: &mut kernel::fmt::Formatter<'_>) -> kernel::fmt::Result {
+        f.write_fmt(kernel::prelude::fmt!("{}", self.as_nanos()))
+    }
+}
