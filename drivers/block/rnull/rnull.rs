@@ -136,6 +136,7 @@ impl kernel::InPlaceModule for NullBlkModule {
                     *module_parameters::no_sched.value() != 0,
                     Arc::pin_init(BadBlocks::new(false), GFP_KERNEL)?,
                     false,
+                    false,
                 )?;
                 disks.push(disk, GFP_KERNEL)?;
             }
@@ -166,6 +167,7 @@ impl NullBlkDevice {
         discard: bool,
         no_sched: bool,
         bad_blocks: Arc<BadBlocks>,
+        bad_blocks_once: bool,
         outer_lock: bool,
     ) -> Result<GenDisk<Self>> {
         let mut flags = mq::Flags::default();
@@ -197,6 +199,7 @@ impl NullBlkDevice {
                     block_size: block_size as usize,
                     outer_lock,
                     bad_blocks,
+                    bad_blocks_once,
                 }
             ),
             GFP_KERNEL,
@@ -400,6 +403,7 @@ struct QueueData {
     block_size: usize,
     outer_lock: bool,
     bad_blocks: Arc<BadBlocks>,
+    bad_blocks_once: bool,
 }
 
 #[pin_data]
@@ -449,12 +453,16 @@ impl Operations for NullBlkDevice {
         if queue_data.bad_blocks.enabled() {
             let start = rq.sector();
             let end = start + rq.sectors() as u64;
-            if !matches!(
-                queue_data.bad_blocks.check(start..end),
-                badblocks::BlockStatus::None
-            ) {
-                rq.data_ref().error.store(1, ordering::Relaxed);
-            }
+            match queue_data.bad_blocks.check(start..end) {
+                badblocks::BlockStatus::None => {}
+                badblocks::BlockStatus::Acknowledged(range)
+                | badblocks::BlockStatus::Unacknowledged(range) => {
+                    rq.data_ref().error.store(1, ordering::Relaxed);
+                    if queue_data.bad_blocks_once {
+                        queue_data.bad_blocks.set_good(range)?;
+                    }
+                }
+            };
         }
 
         // TODO: Skip IO if bad block.

@@ -76,6 +76,7 @@ impl configfs::GroupOperations for Config {
                 discard: 10,
                 no_sched:11,
                 badblocks: 12,
+                badblocks_once: 13,
                 outer_lock: 100,
             ],
         };
@@ -100,6 +101,7 @@ impl configfs::GroupOperations for Config {
                     discard: false,
                     no_sched: false,
                     bad_blocks: Arc::pin_init(BadBlocks::new(false), GFP_KERNEL)?,
+                    bad_blocks_once: false,
                     outer_lock: false,
                 }),
             }),
@@ -160,6 +162,7 @@ struct DeviceConfigInner {
     discard: bool,
     no_sched: bool,
     bad_blocks: Arc<BadBlocks>,
+    bad_blocks_once: bool,
     outer_lock: bool,
 }
 
@@ -197,6 +200,7 @@ impl configfs::AttributeOperations<0> for DeviceConfig {
                 guard.discard,
                 guard.no_sched,
                 guard.bad_blocks.clone(),
+                guard.bad_blocks_once,
                 guard.outer_lock,
             )?);
             guard.powered = true;
@@ -560,6 +564,33 @@ impl configfs::AttributeOperations<12> for DeviceConfig {
                 _ => return Err(EINVAL),
             }
         }
+
+        Ok(())
+    }
+}
+
+#[vtable]
+impl configfs::AttributeOperations<13> for DeviceConfig {
+    type Data = DeviceConfig;
+
+    fn show(this: &DeviceConfig, page: &mut [u8; PAGE_SIZE]) -> Result<usize> {
+        let mut writer = kernel::str::Formatter::new(page);
+
+        if this.data.lock().bad_blocks_once {
+            writer.write_str("1\n")?;
+        } else {
+            writer.write_str("0\n")?;
+        }
+
+        Ok(writer.bytes_written())
+    }
+
+    fn store(this: &DeviceConfig, page: &[u8]) -> Result {
+        if this.data.lock().powered {
+            return Err(EBUSY);
+        }
+
+        this.data.lock().bad_blocks_once = kstrtobool_bytes(page)?;
 
         Ok(())
     }
