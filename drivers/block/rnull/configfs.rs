@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0
 
 use super::{NullBlkDevice, THIS_MODULE};
-use core::fmt::{Display, Write};
+use core::{
+    fmt::{Display, Write},
+    str::FromStr,
+};
 use kernel::{
     bindings,
     block::{
@@ -18,6 +21,106 @@ use kernel::{
     time,
 };
 use pin_init::PinInit;
+
+fn show_field<T: core::fmt::Display>(value: T, page: &mut [u8; PAGE_SIZE]) -> Result<usize> {
+    let mut writer = kernel::str::Formatter::new(page);
+    writer.write_fmt(fmt!("{}\n", value))?;
+    Ok(writer.bytes_written())
+}
+
+fn store_with_power_check<F>(this: &DeviceConfig, page: &[u8], store_fn: F) -> Result
+where
+    F: FnOnce(&DeviceConfig, &[u8]) -> Result,
+{
+    if this.data.lock().powered {
+        return Err(EBUSY);
+    }
+    store_fn(this, page)
+}
+
+fn store_number_with_power_check<F, T>(this: &DeviceConfig, page: &[u8], store_fn: F) -> Result
+where
+    F: FnOnce(&DeviceConfig, T) -> Result,
+    T: FromStr,
+{
+    if this.data.lock().powered {
+        return Err(EBUSY);
+    }
+
+    let text = core::str::from_utf8(page)?.trim();
+    let value = text.parse::<T>().map_err(|_| EINVAL)?;
+
+    store_fn(this, value)
+}
+
+macro_rules! configfs_attribute {
+    (
+        $type:ty,
+        $id:literal,
+        show: |$show_this:ident, $show_page:ident| $show_block:expr,
+        store: |$store_this:ident, $store_page:ident| $store_block:expr
+    ) => {
+        #[vtable]
+        impl configfs::AttributeOperations<$id> for $type {
+            type Data = $type;
+
+            fn show($show_this: &$type, $show_page: &mut [u8; PAGE_SIZE]) -> Result<usize> {
+                $show_block
+            }
+
+            fn store($store_this: &$type, $store_page: &[u8]) -> Result {
+                $store_block
+            }
+        }
+    };
+}
+
+// Specialized macro for simple boolean fields that just store kstrtobool_bytes result.
+macro_rules! configfs_simple_bool_field {
+    ($type:ty, $id:literal, $field:ident) => {
+        configfs_attribute!($type, $id,
+            show: |this, page| show_field(this.data.lock().$field, page),
+            store: |this, page| store_with_power_check(this, page, |this, page| {
+                this.data.lock().$field = kstrtobool_bytes(page)?;
+                Ok(())
+            })
+        );
+    };
+}
+
+// Specialized macro for simple numeric fields that just parse and assign
+macro_rules! configfs_simple_field {
+    // Simple direct assignment
+    ($type:ty, $id:literal, $field:ident, $field_type:ty) => {
+        configfs_attribute!($type, $id,
+            show: |this, page| show_field(this.data.lock().$field, page),
+            store: |this, page| store_number_with_power_check(this, page, |this, value: $field_type| {
+                this.data.lock().$field = value;
+                Ok(())
+            })
+        );
+    };
+    // With infallible conversion expression (direct value)
+    ($type:ty, $id:literal, $field:ident, $field_type:ty, into $convert:expr) => {
+        configfs_attribute!($type, $id,
+                            show: |this, page| show_field(this.data.lock().$field, page),
+                            store: |this, page| store_number_with_power_check(this, page, |this, value: $field_type| {
+                                this.data.lock().$field = $convert(value);
+                                Ok(())
+                            })
+        );
+    };
+    ($type:ty, $id:literal, $field:ident, $field_type:ty, check $check:expr) => {
+        configfs_attribute!($type, $id,
+            show: |this, page| show_field(this.data.lock().$field, page),
+            store: |this, page| store_number_with_power_check(this, page, |this, value: $field_type| {
+                $check(value)?;
+                this.data.lock().$field = value;
+                Ok(())
+            })
+        );
+    };
+}
 
 pub(crate) fn subsystem() -> impl PinInit<kernel::configfs::Subsystem<Config>, Error> {
     let item_type = configfs_attrs! {
@@ -128,6 +231,15 @@ impl TryFrom<u8> for IRQMode {
     }
 }
 
+impl core::str::FromStr for IRQMode {
+    type Err = Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        let value: u8 = s.parse().map_err(|_| EINVAL)?;
+        Ok(value.try_into()?)
+    }
+}
+
 impl Display for IRQMode {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
@@ -212,210 +324,40 @@ impl configfs::AttributeOperations<0> for DeviceConfig {
     }
 }
 
-#[vtable]
-impl configfs::AttributeOperations<1> for DeviceConfig {
-    type Data = DeviceConfig;
+configfs_simple_field!(DeviceConfig, 1, block_size, u32, check GenDiskBuilder::validate_block_size);
+configfs_simple_bool_field!(DeviceConfig, 2, rotational);
+configfs_simple_field!(DeviceConfig, 3, capacity_mib, u64);
+configfs_simple_field!(DeviceConfig, 4, irq_mode, IRQMode);
+configfs_simple_field!(DeviceConfig, 5, completion_time, i64, into time::Delta::from_nanos);
 
-    fn show(this: &DeviceConfig, page: &mut [u8; PAGE_SIZE]) -> Result<usize> {
-        let mut writer = kernel::str::Formatter::new(page);
-        writer.write_fmt(fmt!("{}\n", this.data.lock().block_size))?;
-        Ok(writer.bytes_written())
-    }
-
-    fn store(this: &DeviceConfig, page: &[u8]) -> Result {
-        if this.data.lock().powered {
-            return Err(EBUSY);
-        }
-
-        let text = core::str::from_utf8(page)?.trim();
-        let value = text.parse::<u32>().map_err(|_| EINVAL)?;
-
-        GenDiskBuilder::validate_block_size(value)?;
-        this.data.lock().block_size = value;
-        Ok(())
-    }
-}
-
-#[vtable]
-impl configfs::AttributeOperations<2> for DeviceConfig {
-    type Data = DeviceConfig;
-
-    fn show(this: &DeviceConfig, page: &mut [u8; PAGE_SIZE]) -> Result<usize> {
-        let mut writer = kernel::str::Formatter::new(page);
-
-        if this.data.lock().rotational {
-            writer.write_str("1\n")?;
-        } else {
-            writer.write_str("0\n")?;
-        }
-
-        Ok(writer.bytes_written())
-    }
-
-    fn store(this: &DeviceConfig, page: &[u8]) -> Result {
-        if this.data.lock().powered {
-            return Err(EBUSY);
-        }
-
-        this.data.lock().rotational = kstrtobool_bytes(page)?;
-
-        Ok(())
-    }
-}
-
-#[vtable]
-impl configfs::AttributeOperations<3> for DeviceConfig {
-    type Data = DeviceConfig;
-
-    fn show(this: &DeviceConfig, page: &mut [u8; PAGE_SIZE]) -> Result<usize> {
-        let mut writer = kernel::str::Formatter::new(page);
-        writer.write_fmt(fmt!("{}\n", this.data.lock().capacity_mib))?;
-        Ok(writer.bytes_written())
-    }
-
-    fn store(this: &DeviceConfig, page: &[u8]) -> Result {
-        if this.data.lock().powered {
-            return Err(EBUSY);
-        }
-
-        let text = core::str::from_utf8(page)?.trim();
-        let value = text.parse::<u64>().map_err(|_| EINVAL)?;
-
-        this.data.lock().capacity_mib = value;
-        Ok(())
-    }
-}
-
-#[vtable]
-impl configfs::AttributeOperations<4> for DeviceConfig {
-    type Data = DeviceConfig;
-
-    fn show(this: &DeviceConfig, page: &mut [u8; PAGE_SIZE]) -> Result<usize> {
-        let mut writer = kernel::str::Formatter::new(page);
-        writer.write_fmt(fmt!("{}\n", this.data.lock().irq_mode))?;
-        Ok(writer.bytes_written())
-    }
-
-    fn store(this: &DeviceConfig, page: &[u8]) -> Result {
-        if this.data.lock().powered {
-            return Err(EBUSY);
-        }
-
-        let text = core::str::from_utf8(page)?.trim();
-        let value = text.parse::<u8>().map_err(|_| EINVAL)?;
-
-        this.data.lock().irq_mode = IRQMode::try_from(value)?;
-        Ok(())
-    }
-}
-
-#[vtable]
-impl configfs::AttributeOperations<5> for DeviceConfig {
-    type Data = DeviceConfig;
-
-    fn show(this: &DeviceConfig, page: &mut [u8; PAGE_SIZE]) -> Result<usize> {
-        let mut writer = kernel::str::Formatter::new(page);
-        writer.write_fmt(fmt!("{}\n", this.data.lock().completion_time.as_nanos()))?;
-        Ok(writer.bytes_written())
-    }
-
-    fn store(this: &DeviceConfig, page: &[u8]) -> Result {
-        if this.data.lock().powered {
-            return Err(EBUSY);
-        }
-
-        let text = core::str::from_utf8(page)?.trim();
-        let value = text
-            .parse::<u64>()
-            .map_err(|_| kernel::error::code::EINVAL)?;
-
-        let completion_time: i64 = value.try_into()?;
-
-        this.data.lock().completion_time = time::Delta::from_nanos(completion_time);
-        Ok(())
-    }
-}
-
-#[vtable]
-impl configfs::AttributeOperations<6> for DeviceConfig {
-    type Data = DeviceConfig;
-
-    fn show(this: &DeviceConfig, page: &mut [u8; PAGE_SIZE]) -> Result<usize> {
-        let mut writer = kernel::str::Formatter::new(page);
-
-        if this.data.lock().memory_backed {
-            writer.write_fmt(fmt!("1\n"))?;
-        } else {
-            writer.write_fmt(fmt!("0\n"))?;
-        }
-
-        Ok(writer.bytes_written())
-    }
-
-    fn store(this: &DeviceConfig, page: &[u8]) -> Result {
-        if this.data.lock().powered {
-            return Err(EBUSY);
-        }
-
+configfs_attribute!(DeviceConfig, 6,
+    show: |this, page| show_field(this.data.lock().memory_backed, page),
+    store: |this, page| store_with_power_check(this, page, |this, page| {
         let value = kstrtobool_bytes(page)?;
-
-        this.data.lock().discard &= value;
-        this.data.lock().memory_backed = value;
-
+        let mut guard = this.data.lock();
+        guard.discard &= value;
+        guard.memory_backed = value;
         Ok(())
-    }
-}
+    })
+);
 
-#[vtable]
-impl configfs::AttributeOperations<7> for DeviceConfig {
-    type Data = DeviceConfig;
-
-    fn show(this: &DeviceConfig, page: &mut [u8; PAGE_SIZE]) -> Result<usize> {
-        let mut writer = kernel::str::Formatter::new(page);
-        writer.write_fmt(fmt!("{}\n", this.data.lock().submit_queues))?;
-        Ok(writer.bytes_written())
-    }
-
-    fn store(this: &DeviceConfig, page: &[u8]) -> Result {
-        if this.data.lock().powered {
-            return Err(EBUSY);
-        }
-
-        let text = core::str::from_utf8(page)?.trim();
-        let value = text
-            .parse::<u32>()
-            .map_err(|_| kernel::error::code::EINVAL)?;
-
+configfs_simple_field!(
+    DeviceConfig,
+    7,
+    submit_queues,
+    u32,
+    check | value | {
         if value == 0 || value > kernel::num_possible_cpus() {
-            return Err(kernel::error::code::EINVAL);
-        }
-
-        this.data.lock().submit_queues = value;
-        Ok(())
-    }
-}
-
-#[vtable]
-impl configfs::AttributeOperations<8> for DeviceConfig {
-    type Data = DeviceConfig;
-
-    fn show(this: &DeviceConfig, page: &mut [u8; PAGE_SIZE]) -> Result<usize> {
-        let mut writer = kernel::str::Formatter::new(page);
-
-        if this.data.lock().submit_queues == kernel::num_online_nodes() {
-            writer.write_fmt(fmt!("1\n"))?;
+            Err(kernel::error::code::EINVAL)
         } else {
-            writer.write_fmt(fmt!("0\n"))?;
+            Ok(())
         }
-
-        Ok(writer.bytes_written())
     }
+);
 
-    fn store(this: &DeviceConfig, page: &[u8]) -> Result {
-        if this.data.lock().powered {
-            return Err(EBUSY);
-        }
-
+configfs_attribute!(DeviceConfig, 8,
+    show: |this, page| show_field(this.data.lock().submit_queues == kernel::num_online_nodes(), page),
+    store: |this, page| store_with_power_check(this, page, |this, page| {
         let value = core::str::from_utf8(page)?
             .trim()
             .parse::<u8>()
@@ -425,114 +367,48 @@ impl configfs::AttributeOperations<8> for DeviceConfig {
         if value {
             this.data.lock().submit_queues *= kernel::num_online_nodes();
         }
-
         Ok(())
-    }
-}
+    })
+);
 
-#[vtable]
-impl configfs::AttributeOperations<9> for DeviceConfig {
-    type Data = DeviceConfig;
-
-    fn show(this: &DeviceConfig, page: &mut [u8; PAGE_SIZE]) -> Result<usize> {
-        let mut writer = kernel::str::Formatter::new(page);
-        writer.write_fmt(fmt!("{}\n", this.data.lock().home_node))?;
-        Ok(writer.bytes_written())
-    }
-
-    fn store(this: &DeviceConfig, page: &[u8]) -> Result {
-        if this.data.lock().powered {
-            return Err(EBUSY);
-        }
-
-        let text = core::str::from_utf8(page)?.trim();
-        let value = text
-            .parse::<i32>()
-            .map_err(|_| kernel::error::code::EINVAL)?;
-
+configfs_simple_field!(
+    DeviceConfig,
+    9,
+    home_node,
+    i32,
+    check | value | {
         if value == 0 || value >= kernel::num_online_nodes().try_into()? {
-            return Err(kernel::error::code::EINVAL);
-        }
-
-        this.data.lock().home_node = value;
-        Ok(())
-    }
-}
-
-#[vtable]
-impl configfs::AttributeOperations<10> for DeviceConfig {
-    type Data = DeviceConfig;
-
-    fn show(this: &DeviceConfig, page: &mut [u8; PAGE_SIZE]) -> Result<usize> {
-        let mut writer = kernel::str::Formatter::new(page);
-
-        if this.data.lock().discard {
-            writer.write_str("1\n")?;
+            Err(kernel::error::code::EINVAL)
         } else {
-            writer.write_str("0\n")?;
+            Ok(())
         }
-
-        Ok(writer.bytes_written())
     }
+);
 
-    fn store(this: &DeviceConfig, page: &[u8]) -> Result {
-        if this.data.lock().powered {
-            return Err(EBUSY);
-        }
-
+configfs_attribute!(DeviceConfig, 10,
+    show: |this, page| show_field(this.data.lock().discard, page),
+    store: |this, page| store_with_power_check(this, page, |this, page| {
         if !this.data.lock().memory_backed {
             return Err(EINVAL);
         }
-
         this.data.lock().discard = kstrtobool_bytes(page)?;
-
         Ok(())
-    }
-}
+    })
+);
 
-#[vtable]
-impl configfs::AttributeOperations<11> for DeviceConfig {
-    type Data = DeviceConfig;
+configfs_simple_bool_field!(DeviceConfig, 11, no_sched);
 
-    fn show(this: &DeviceConfig, page: &mut [u8; PAGE_SIZE]) -> Result<usize> {
-        let mut writer = kernel::str::Formatter::new(page);
-
-        if this.data.lock().no_sched {
-            writer.write_str("1\n")?;
-        } else {
-            writer.write_str("0\n")?;
-        }
-
-        Ok(writer.bytes_written())
-    }
-
-    fn store(this: &DeviceConfig, page: &[u8]) -> Result {
-        if this.data.lock().powered {
-            return Err(EBUSY);
-        }
-
-        this.data.lock().no_sched = kstrtobool_bytes(page)?;
-
-        Ok(())
-    }
-}
-
-#[vtable]
-impl configfs::AttributeOperations<12> for DeviceConfig {
-    type Data = DeviceConfig;
-
-    fn show(this: &DeviceConfig, page: &mut [u8; PAGE_SIZE]) -> Result<usize> {
+configfs_attribute!(DeviceConfig, 12,
+    show: |this, page| {
         let ret = this.data.lock().bad_blocks.show(page, false);
         if ret < 0 {
             Err(Error::from_errno(ret as c_int))
         } else {
             Ok(ret as usize)
         }
-    }
-
-    fn store(this: &DeviceConfig, page: &[u8]) -> Result {
+    },
+    store: |this, page| {
         // This attribute can be set while device is powered.
-
         for line in core::str::from_utf8(page)?.lines() {
             let mut chars = line.chars();
             match chars.next() {
@@ -563,61 +439,9 @@ impl configfs::AttributeOperations<12> for DeviceConfig {
                 _ => return Err(EINVAL),
             }
         }
-
         Ok(())
     }
-}
+);
 
-#[vtable]
-impl configfs::AttributeOperations<13> for DeviceConfig {
-    type Data = DeviceConfig;
-
-    fn show(this: &DeviceConfig, page: &mut [u8; PAGE_SIZE]) -> Result<usize> {
-        let mut writer = kernel::str::Formatter::new(page);
-
-        if this.data.lock().bad_blocks_once {
-            writer.write_str("1\n")?;
-        } else {
-            writer.write_str("0\n")?;
-        }
-
-        Ok(writer.bytes_written())
-    }
-
-    fn store(this: &DeviceConfig, page: &[u8]) -> Result {
-        if this.data.lock().powered {
-            return Err(EBUSY);
-        }
-
-        this.data.lock().bad_blocks_once = kstrtobool_bytes(page)?;
-
-        Ok(())
-    }
-}
-
-#[vtable]
-impl configfs::AttributeOperations<100> for DeviceConfig {
-    type Data = DeviceConfig;
-
-    fn show(this: &DeviceConfig, page: &mut [u8; PAGE_SIZE]) -> Result<usize> {
-        let mut writer = kernel::str::Formatter::new(page);
-
-        if this.data.lock().outer_lock {
-            writer.write_str("1\n")?;
-        } else {
-            writer.write_str("0\n")?;
-        }
-
-        Ok(writer.bytes_written())
-    }
-
-    fn store(this: &DeviceConfig, page: &[u8]) -> Result {
-        if this.data.lock().powered {
-            return Err(EBUSY);
-        }
-
-        this.data.lock().outer_lock = kstrtobool_bytes(page)?;
-
-        Ok(())
-    }
-}
+configfs_simple_bool_field!(DeviceConfig, 13, bad_blocks_once);
+configfs_simple_bool_field!(DeviceConfig, 100, outer_lock);
