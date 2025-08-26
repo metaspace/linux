@@ -104,6 +104,7 @@ impl configfs::GroupOperations for Config {
                 no_sched:11,
                 badblocks: 12,
                 badblocks_once: 13,
+                badblocks_partial_io: 14,
             ],
         };
 
@@ -128,6 +129,7 @@ impl configfs::GroupOperations for Config {
                     no_sched: false,
                     bad_blocks: Arc::pin_init(BadBlocks::new(false), GFP_KERNEL)?,
                     bad_blocks_once: false,
+                    bad_blocks_partial_io: false,
                 }),
             }),
             core::iter::empty(),
@@ -189,6 +191,7 @@ struct DeviceConfigInner {
     no_sched: bool,
     bad_blocks: Arc<BadBlocks>,
     bad_blocks_once: bool,
+    bad_blocks_partial_io: bool,
 }
 
 #[vtable]
@@ -226,6 +229,7 @@ impl configfs::AttributeOperations<0> for DeviceConfig {
                 no_sched: guard.no_sched,
                 bad_blocks: guard.bad_blocks.clone(),
                 bad_blocks_once: guard.bad_blocks_once,
+                bad_blocks_partial_io: guard.bad_blocks_partial_io,
             })?);
             guard.powered = true;
         } else if guard.powered && !power_op {
@@ -427,29 +431,5 @@ impl configfs::AttributeOperations<12> for DeviceConfig {
     }
 }
 
-#[vtable]
-impl configfs::AttributeOperations<13> for DeviceConfig {
-    type Data = DeviceConfig;
-
-    fn show(this: &DeviceConfig, page: &mut [u8; PAGE_SIZE]) -> Result<usize> {
-        let mut writer = kernel::str::Formatter::new(page);
-
-        if this.data.lock().bad_blocks_once {
-            writer.write_str("1\n")?;
-        } else {
-            writer.write_str("0\n")?;
-        }
-
-        Ok(writer.bytes_written())
-    }
-
-    fn store(this: &DeviceConfig, page: &[u8]) -> Result {
-        if this.data.lock().powered {
-            return Err(EBUSY);
-        }
-
-        this.data.lock().bad_blocks_once = kstrtobool_bytes(page)?;
-
-        Ok(())
-    }
-}
+configfs_simple_bool_field!(DeviceConfig, 13, bad_blocks_once);
+configfs_simple_bool_field!(DeviceConfig, 14, bad_blocks_partial_io);
