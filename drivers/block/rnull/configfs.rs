@@ -181,6 +181,7 @@ impl configfs::GroupOperations for Config {
                 no_sched:11,
                 badblocks: 12,
                 badblocks_once: 13,
+                badblocks_partial_io: 14,
                 outer_lock: 100,
             ],
         };
@@ -206,6 +207,7 @@ impl configfs::GroupOperations for Config {
                     no_sched: false,
                     bad_blocks: Arc::pin_init(BadBlocks::new(false), GFP_KERNEL)?,
                     bad_blocks_once: false,
+                    bad_blocks_partial_io: false,
                     outer_lock: false,
                 }),
             }),
@@ -276,6 +278,7 @@ struct DeviceConfigInner {
     no_sched: bool,
     bad_blocks: Arc<BadBlocks>,
     bad_blocks_once: bool,
+    bad_blocks_partial_io: bool,
     outer_lock: bool,
 }
 
@@ -314,6 +317,7 @@ impl configfs::AttributeOperations<0> for DeviceConfig {
                 guard.no_sched,
                 guard.bad_blocks.clone(),
                 guard.bad_blocks_once,
+                guard.bad_blocks_partial_io,
                 guard.outer_lock,
             )?);
             guard.powered = true;
@@ -446,4 +450,5 @@ configfs_attribute!(DeviceConfig, 12,
 );
 
 configfs_simple_bool_field!(DeviceConfig, 13, bad_blocks_once);
+configfs_simple_bool_field!(DeviceConfig, 14, bad_blocks_partial_io);
 configfs_simple_bool_field!(DeviceConfig, 100, outer_lock);
