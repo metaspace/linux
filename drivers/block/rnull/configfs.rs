@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 
-use super::{NullBlkDevice, THIS_MODULE};
+use super::{DiskStorage, NullBlkDevice, THIS_MODULE};
 use core::{
     fmt::{Display, Write},
     str::FromStr,
@@ -182,10 +182,11 @@ impl configfs::GroupOperations for Config {
                 badblocks: 12,
                 badblocks_once: 13,
                 badblocks_partial_io: 14,
-                outer_lock: 100,
+                cache_size_mib: 15,
             ],
         };
 
+        let block_size = 4096;
         Ok(configfs::Group::new(
             name.try_into()?,
             item_type,
@@ -193,7 +194,7 @@ impl configfs::GroupOperations for Config {
             try_pin_init!( DeviceConfig {
                 data <- new_mutex!(DeviceConfigInner {
                     powered: false,
-                    block_size: 4096,
+                    block_size,
                     rotational: false,
                     disk: None,
                     capacity_mib: 4096,
@@ -208,7 +209,8 @@ impl configfs::GroupOperations for Config {
                     bad_blocks: Arc::pin_init(BadBlocks::new(false), GFP_KERNEL)?,
                     bad_blocks_once: false,
                     bad_blocks_partial_io: false,
-                    outer_lock: false,
+                    disk_storage: Arc::pin_init(DiskStorage::new(0, block_size as usize), GFP_KERNEL)?,
+                    cache_size_mib: 0,
                 }),
             }),
         ))
@@ -279,7 +281,8 @@ struct DeviceConfigInner {
     bad_blocks: Arc<BadBlocks>,
     bad_blocks_once: bool,
     bad_blocks_partial_io: bool,
-    outer_lock: bool,
+    cache_size_mib: u64,
+    disk_storage: Arc<DiskStorage>,
 }
 
 #[vtable]
@@ -318,7 +321,7 @@ impl configfs::AttributeOperations<0> for DeviceConfig {
                 guard.bad_blocks.clone(),
                 guard.bad_blocks_once,
                 guard.bad_blocks_partial_io,
-                guard.outer_lock,
+                guard.disk_storage.clone(),
             )?);
             guard.powered = true;
         } else if guard.powered && !power_op {
@@ -330,6 +333,7 @@ impl configfs::AttributeOperations<0> for DeviceConfig {
     }
 }
 
+// DiskStorage::new(cache_size_mib << 20, block_size as usize),
 configfs_simple_field!(DeviceConfig, 1, block_size, u32, check GenDiskBuilder::validate_block_size);
 configfs_simple_bool_field!(DeviceConfig, 2, rotational);
 configfs_simple_field!(DeviceConfig, 3, capacity_mib, u64);
@@ -451,4 +455,15 @@ configfs_attribute!(DeviceConfig, 12,
 
 configfs_simple_bool_field!(DeviceConfig, 13, bad_blocks_once);
 configfs_simple_bool_field!(DeviceConfig, 14, bad_blocks_partial_io);
-configfs_simple_bool_field!(DeviceConfig, 100, outer_lock);
+configfs_attribute!(DeviceConfig, 15,
+    show: |this, page| show_field(this.data.lock().cache_size_mib, page),
+    store: |this, page| store_with_power_check(this, page, |this, page| {
+
+        let text = core::str::from_utf8(page)?.trim();
+        let value = text.parse::<u64>().map_err(|_| EINVAL)?;
+        let mut guard = this.data.lock();
+        guard.disk_storage = Arc::pin_init(DiskStorage::new(value, guard.block_size as usize), GFP_KERNEL)?;
+        guard.cache_size_mib = value;
+        Ok(())
+    })
+);
