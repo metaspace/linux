@@ -3,9 +3,13 @@
 //! This is a Rust implementation of the C null block driver.
 
 mod configfs;
+mod disk_storage;
 
 use configfs::IRQMode;
-use core::ops::Deref;
+use core::option::Option::Some;
+use disk_storage::DiskStorage;
+use disk_storage::NullBlockPage;
+use disk_storage::TreeContainer;
 use kernel::{
     bindings,
     block::{
@@ -17,24 +21,22 @@ use kernel::{
             gen_disk::{self, GenDisk},
             Operations, TagSet,
         },
-        SECTOR_MASK, SECTOR_SHIFT,
+        SECTOR_SHIFT,
     },
     error::{code, Result},
     ffi, new_mutex, new_spinlock,
-    page::{Page, PAGE_SIZE},
     prelude::*,
     str::CString,
     sync::{
         atomic::{ordering, Atomic},
-        Arc, Mutex, SpinLock,
+        Arc, Mutex, SpinLock, SpinLockGuard,
     },
     time::{
         hrtimer::{HrTimerCallback, HrTimerPointer, HrTimerRestart},
         Delta,
     },
     types::{ARef, BorrowIterator, OwnableRefCounted, Owned},
-    xarray::{self, XArray},
-    CacheAligned,
+    xarray::{self},
 };
 use pin_init::PinInit;
 
@@ -121,9 +123,10 @@ impl kernel::InPlaceModule for NullBlkModule {
                     *module_parameters::submit_queues.value()
                 };
 
+                let block_size = *module_parameters::bs.value();
                 let disk = NullBlkDevice::new(
                     &name,
-                    *module_parameters::bs.value(),
+                    block_size,
                     *module_parameters::rotational.value() != 0,
                     *module_parameters::gb.value() * 1024,
                     (*module_parameters::irqmode.value()).try_into()?,
@@ -136,7 +139,7 @@ impl kernel::InPlaceModule for NullBlkModule {
                     Arc::pin_init(BadBlocks::new(false), GFP_KERNEL)?,
                     false,
                     false,
-                    false,
+                    Arc::pin_init(DiskStorage::new(0, block_size as usize), GFP_KERNEL)?,
                 )?;
                 disks.push(disk, GFP_KERNEL)?;
             }
@@ -151,9 +154,20 @@ impl kernel::InPlaceModule for NullBlkModule {
     }
 }
 
-struct NullBlkDevice;
+#[pin_data]
+struct NullBlkDevice {
+    storage: Arc<DiskStorage>,
+    irq_mode: IRQMode,
+    completion_time: Delta,
+    memory_backed: bool,
+    block_size: usize,
+    bad_blocks: Arc<BadBlocks>,
+    bad_blocks_once: bool,
+    bad_blocks_partial_io: bool,
+}
 
 impl NullBlkDevice {
+    // TODO: Change to "attach"
     fn new(
         name: &CStr,
         block_size: u32,
@@ -169,10 +183,13 @@ impl NullBlkDevice {
         bad_blocks: Arc<BadBlocks>,
         bad_blocks_once: bool,
         bad_blocks_partial_io: bool,
-        outer_lock: bool,
+        storage: Arc<DiskStorage>,
     ) -> Result<GenDisk<Self>> {
         let mut flags = mq::Flags::default();
 
+        // TODO: lim.features |= BLK_FEAT_WRITE_CACHE;
+        // if (dev->fua)
+        // 	lim.features |= BLK_FEAT_FUA;
         if memory_backed {
             flags |= mq::Flags::BLOCKING;
         }
@@ -191,19 +208,16 @@ impl NullBlkDevice {
         )?;
 
         let queue_data = Box::try_pin_init(
-            try_pin_init!(
-                QueueData {
-                    tree <- TreeContainer::new(),
-                    irq_mode,
-                    completion_time,
-                    memory_backed,
-                    block_size: block_size as usize,
-                    outer_lock,
-                    bad_blocks,
-                    bad_blocks_once,
-                    bad_blocks_partial_io,
-                }
-            ),
+            try_pin_init!(Self {
+                storage,
+                irq_mode,
+                completion_time,
+                memory_backed,
+                block_size: block_size as usize,
+                bad_blocks,
+                bad_blocks_once,
+                bad_blocks_partial_io,
+            }),
             GFP_KERNEL,
         )?;
 
@@ -222,46 +236,77 @@ impl NullBlkDevice {
         builder.build(fmt!("{}", name.to_str()?), tagset, queue_data)
     }
 
+    fn preload<'b, 'c>(
+        tree_guard: &'b mut SpinLockGuard<'c, Pin<KBox<TreeContainer>>>,
+        hw_data_guard: &'b mut SpinLockGuard<'c, HwQueueContext>,
+        block_size: usize,
+    ) -> Result {
+        let free_count = hw_data_guard.preload.free_count();
+        if free_count > 0 {
+            let mut preload = tree_guard.do_unlocked(|| {
+                hw_data_guard.do_unlocked(|| -> Result<_> {
+                    let mut v = KVec::new();
+                    for _ in 0..free_count {
+                        v.push(xarray::XArrayPreloadNode::new(GFP_KERNEL)?, GFP_KERNEL)?
+                    }
+                    Ok(v)
+                })
+            })?;
+            hw_data_guard.preload.preload_with(&mut preload)?;
+        }
+
+        if hw_data_guard.page.is_none() {
+            hw_data_guard.page =
+                Some(tree_guard.do_unlocked(|| {
+                    hw_data_guard.do_unlocked(|| NullBlockPage::new(block_size))
+                })?);
+        }
+
+        Ok(())
+    }
+
     #[inline(always)]
-    fn write(
-        tree: &mut xarray::Guard<'_, TreeNode>,
+    fn write<'a, 'b, 'c>(
+        &'a self,
+        mut tree_guard: &'b mut SpinLockGuard<'c, Pin<KBox<TreeContainer>>>,
+        mut hw_data_guard: &'b mut SpinLockGuard<'c, HwQueueContext>,
         mut sector: u64,
         mut segment: Segment<'_>,
     ) -> Result {
         while !segment.is_empty() {
-            let page_idx = sector >> block::PAGE_SECTORS_SHIFT;
+            Self::preload(&mut tree_guard, &mut hw_data_guard, self.block_size)?;
 
-            let page = if let Some(page) = tree.get_mut(page_idx as usize) {
-                page
-            } else {
-                let page = tree.do_unlocked(|| NullBlockPage::new())?;
-                tree.store(page_idx as usize, page, GFP_NOIO)?;
-                tree.get_mut(page_idx as usize).unwrap()
-            };
-
+            let mut access = self.storage.access(&mut tree_guard, &mut hw_data_guard);
+            let page = access.get_write_page(sector)?;
             page.set_occupied(sector);
             let page_offset = (sector & block::SECTOR_MASK as u64) << block::SECTOR_SHIFT;
-            sector += segment.copy_to_page(page.page.get_pin_mut(), page_offset as usize) as u64
+            sector += segment.copy_to_page(page.page_mut().get_pin_mut(), page_offset as usize)
+                as u64
                 >> block::SECTOR_SHIFT;
         }
         Ok(())
     }
 
     #[inline(always)]
-    fn read(
-        tree: &xarray::Guard<'_, TreeNode>,
+    fn read<'a, 'b, 'c>(
+        &'a self,
+        mut tree_guard: &'b mut SpinLockGuard<'c, Pin<KBox<TreeContainer>>>,
+        mut hw_data_guard: &'b mut SpinLockGuard<'c, HwQueueContext>,
         mut sector: u64,
         mut segment: Segment<'_>,
     ) -> Result {
-        while !segment.is_empty() {
-            let idx = sector >> block::PAGE_SECTORS_SHIFT;
+        let access = self.storage.access(&mut tree_guard, &mut hw_data_guard);
 
-            if let Some(page) = tree.get(idx as usize) {
-                let page_offset = (sector & block::SECTOR_MASK as u64) << block::SECTOR_SHIFT;
-                sector += segment.copy_from_page(&page.page, page_offset as usize) as u64
-                    >> block::SECTOR_SHIFT;
-            } else {
-                sector += segment.zero_page() as u64 >> block::SECTOR_SHIFT;
+        while !segment.is_empty() {
+            let page = access.get_read_page(sector);
+
+            match page {
+                Some(page) => {
+                    let page_offset = (sector & block::SECTOR_MASK as u64) << block::SECTOR_SHIFT;
+                    sector += segment.copy_from_page(page.page(), page_offset as usize) as u64
+                        >> block::SECTOR_SHIFT;
+                }
+                None => sector += segment.zero_page() as u64 >> block::SECTOR_SHIFT,
             }
         }
 
@@ -269,29 +314,21 @@ impl NullBlkDevice {
     }
 
     fn discard(
-        tree: &mut xarray::Guard<'_, TreeNode>,
+        &self,
+        hw_data: &Pin<&SpinLock<HwQueueContext>>,
         mut sector: u64,
         sectors: u32,
-        block_size: usize,
     ) -> Result {
+        let mut tree_guard = self.storage.lock();
+        let mut hw_data_guard = hw_data.lock();
+
+        let mut access = self.storage.access(&mut tree_guard, &mut hw_data_guard);
+
         let mut remaining_bytes = (sectors as usize) << SECTOR_SHIFT;
 
         while remaining_bytes > 0 {
-            let page_idx = sector >> block::PAGE_SECTORS_SHIFT;
-            let mut remove = false;
-            // TODO: XArray location handle
-            if let Some(page) = tree.get_mut(page_idx as usize) {
-                page.set_free(sector);
-                if page.is_empty() {
-                    remove = true;
-                }
-            }
-
-            if remove {
-                drop(tree.remove(page_idx as usize))
-            }
-
-            let processed = remaining_bytes.min(block_size);
+            access.free_sector(sector);
+            let processed = remaining_bytes.min(self.block_size);
             sector += (processed >> SECTOR_SHIFT) as u64;
             remaining_bytes -= processed;
         }
@@ -301,13 +338,18 @@ impl NullBlkDevice {
 
     #[inline(never)]
     fn transfer(
+        &self,
+        hw_data: &Pin<&SpinLock<HwQueueContext>>,
         rq: &mut Owned<mq::Request<Self>>,
-        tree: &mut xarray::Guard<'_, TreeNode>,
         sectors: u32,
     ) -> Result {
         let mut sector = rq.sector();
         let end_sector = sector + <u32 as Into<u64>>::into(sectors);
         let command = rq.command();
+
+        // TODO: Use `PerCpu` to get rid of this lock
+        let mut hw_data_guard = hw_data.lock();
+        let mut tree_guard = self.storage.lock();
 
         for bio in rq.bio_iter_mut() {
             let mut segment_iter = bio.segment_iter();
@@ -315,10 +357,14 @@ impl NullBlkDevice {
                 // Length might be limited by bad blocks.
                 let length = segment
                     .len()
-                    .min((sector - end_sector) as u32 >> SECTOR_SHIFT);
+                    .min((end_sector - sector) as u32 >> SECTOR_SHIFT);
                 match command {
-                    bindings::req_op_REQ_OP_WRITE => Self::write(tree, sector, segment)?,
-                    bindings::req_op_REQ_OP_READ => Self::read(tree, sector, segment)?,
+                    bindings::req_op_REQ_OP_WRITE => {
+                        self.write(&mut tree_guard, &mut hw_data_guard, sector, segment)?
+                    }
+                    bindings::req_op_REQ_OP_READ => {
+                        self.read(&mut tree_guard, &mut hw_data_guard, sector, segment)?
+                    }
                     _ => (),
                 }
                 sector += length as u64 >> SECTOR_SHIFT;
@@ -328,29 +374,26 @@ impl NullBlkDevice {
                 }
             }
         }
+
         Ok(())
     }
 
-    fn handle_bad_blocks(
-        rq: &mut Owned<mq::Request<Self>>,
-        queue_data: &QueueData,
-        sectors: &mut u32,
-    ) -> Result {
-        if queue_data.bad_blocks.enabled() {
+    fn handle_bad_blocks(&self, rq: &mut Owned<mq::Request<Self>>, sectors: &mut u32) -> Result {
+        if self.bad_blocks.enabled() {
             let start = rq.sector();
             let end = start + *sectors as u64;
-            match queue_data.bad_blocks.check(start..end) {
+            match self.bad_blocks.check(start..end) {
                 badblocks::BlockStatus::None => {}
                 badblocks::BlockStatus::Acknowledged(mut range)
                 | badblocks::BlockStatus::Unacknowledged(mut range) => {
                     rq.data_ref().error.store(1, ordering::Relaxed);
 
-                    if queue_data.bad_blocks_once {
-                        queue_data.bad_blocks.set_good(range.clone())?;
+                    if self.bad_blocks_once {
+                        self.bad_blocks.set_good(range.clone())?;
                     }
 
-                    if queue_data.bad_blocks_partial_io {
-                        let block_size_sectors = (queue_data.block_size >> SECTOR_SHIFT) as u64;
+                    if self.bad_blocks_partial_io {
+                        let block_size_sectors = (self.block_size >> SECTOR_SHIFT) as u64;
                         range.start = align_down(range.start, block_size_sectors);
                         if start < range.start {
                             *sectors = (range.start - start) as u32;
@@ -375,88 +418,9 @@ impl NullBlkDevice {
     }
 }
 
-const _CHEKC_STATUS_WIDTH: () = build_assert!((PAGE_SIZE >> SECTOR_SHIFT) <= 64);
-
-struct NullBlockPage {
-    page: Owned<Page>,
-    status: u64,
-}
-
-impl NullBlockPage {
-    fn new() -> Result<KBox<Self>> {
-        Ok(KBox::new(
-            Self {
-                page: Page::alloc_page(GFP_NOIO | __GFP_ZERO)?,
-                status: 0,
-            },
-            GFP_NOIO,
-        )?)
-    }
-
-    fn set_occupied(&mut self, sector: u64) {
-        let idx = sector & SECTOR_MASK as u64;
-        self.status |= 1 << idx;
-    }
-
-    fn set_free(&mut self, sector: u64) {
-        let idx = sector & SECTOR_MASK as u64;
-        self.status &= !(1 << idx);
-    }
-
-    fn is_empty(&self) -> bool {
-        self.status == 0
-    }
-}
-
-type TreeNode = KBox<NullBlockPage>;
-type Tree = XArray<TreeNode>;
-
-#[pin_data]
-struct TreeContainer {
-    // `XArray` is safe to use without a lock, as it applies internal locking.
-    // However, there are two reasons to use an external lock: a) cache line
-    // contention and b) we don't want to take the lock for each page we
-    // process.
-    //
-    // A: The `XArray` lock (xa_lock) is located on the same cache line as the
-    // xarray data pointer (xa_head). The effect of this arrangement is that
-    // under heavy contention, we often get a cache miss when we try to follow
-    // the data pointer after acquiring the lock. We would rather have consumers
-    // spinning on another lock, so we do not get a miss on xa_head. This issue
-    // can potentially be fixed by padding the C `struct xarray`.
-    //
-    // B: The current `XArray` Rust API requires that we take the `xa_lock` for
-    // each `XArray` operation. This is very inefficient when the lock is
-    // contended and we have many operations to perform. Eventually we should
-    // update the `XArray` API to allow multiple tree operations under a single
-    // lock acquisition. For now, serialize tree access with an external lock.
-    #[pin]
-    tree: CacheAligned<Tree>,
-    #[pin]
-    lock: CacheAligned<SpinLock<()>>,
-}
-
-impl TreeContainer {
-    fn new() -> impl PinInit<Self> {
-        pin_init!(TreeContainer {
-            tree <- CacheAligned::new_initializer(XArray::new(kernel::xarray::AllocKind::Alloc)),
-            lock <- CacheAligned::new_initializer(new_spinlock!((), "rnullb:mem")),
-        })
-    }
-}
-
-#[pin_data]
-struct QueueData {
-    #[pin]
-    tree: TreeContainer,
-    irq_mode: IRQMode,
-    completion_time: Delta,
-    memory_backed: bool,
-    block_size: usize,
-    outer_lock: bool,
-    bad_blocks: Arc<BadBlocks>,
-    bad_blocks_once: bool,
-    bad_blocks_partial_io: bool,
+struct HwQueueContext {
+    page: Option<KBox<disk_storage::NullBlockPage>>,
+    preload: xarray::XArrayPreloadBuffer,
 }
 
 #[pin_data]
@@ -511,10 +475,10 @@ where
 
 #[vtable]
 impl Operations for NullBlkDevice {
-    type QueueData = Pin<KBox<QueueData>>;
+    type QueueData = Pin<KBox<Self>>;
     type RequestData = Pdu;
     type TagSetData = ();
-    type HwData = ();
+    type HwData = Pin<KBox<SpinLock<HwQueueContext>>>;
 
     fn new_request_data() -> impl PinInit<Self::RequestData> {
         pin_init!(Pdu {
@@ -525,51 +489,45 @@ impl Operations for NullBlkDevice {
 
     #[inline(always)]
     fn queue_rq(
-        _hw_data: (),
-        queue_data: Pin<&QueueData>,
+        hw_data: Pin<&SpinLock<HwQueueContext>>,
+        this: Pin<&Self>,
         mut rq: Owned<mq::Request<Self>>,
         _is_last: bool,
     ) -> Result {
         let mut sectors = rq.sectors();
 
-        Self::handle_bad_blocks(&mut rq, queue_data.get_ref(), &mut sectors)?;
+        Self::handle_bad_blocks(this.get_ref(), &mut rq, &mut sectors)?;
 
-        if queue_data.memory_backed {
-            let outer_guard = if queue_data.outer_lock {
-                Some(queue_data.tree.lock.lock())
-            } else {
-                None
-            };
-
-            let tree = queue_data.tree.tree.deref();
-            let mut guard = tree.lock();
-
+        if this.memory_backed {
             if rq.command() == bindings::req_op_REQ_OP_DISCARD {
-                Self::discard(&mut guard, rq.sector(), sectors, queue_data.block_size)?;
+                this.discard(&hw_data, rq.sector(), sectors)?;
             } else {
-                Self::transfer(&mut rq, &mut guard, sectors)?;
+                this.transfer(&hw_data, &mut rq, sectors)?;
             }
-
-            drop(guard);
-            drop(outer_guard);
         }
 
-        match queue_data.irq_mode {
+        match this.irq_mode {
             IRQMode::None => Self::end_request(rq),
             IRQMode::Soft => mq::Request::complete(rq.into()),
             IRQMode::Timer => {
                 OwnableRefCounted::into_shared(rq)
-                    .start(queue_data.completion_time)
+                    .start(this.completion_time)
                     .dismiss();
             }
         }
         Ok(())
     }
 
-    fn commit_rqs(_hw_data: (), _queue_data: Pin<&QueueData>) {}
+    fn commit_rqs(_hw_data: Pin<&SpinLock<HwQueueContext>>, _queue_data: Pin<&Self>) {}
 
-    fn init_hctx(_tagset_data: (), _hctx_idx: u32) -> Result {
-        Ok(())
+    fn init_hctx(_tagset_data: (), _hctx_idx: u32) -> Result<Self::HwData> {
+        KBox::pin_init(
+            new_spinlock!(HwQueueContext {
+                page: None,
+                preload: xarray::XArrayPreloadBuffer::new(2)?
+            }),
+            GFP_KERNEL,
+        )
     }
 
     fn complete(rq: ARef<mq::Request<Self>>) {

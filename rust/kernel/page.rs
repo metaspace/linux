@@ -10,7 +10,10 @@ use crate::{
     types::{Opaque, Ownable, Owned},
     uaccess::UserSliceReader,
 };
-use core::ptr::{self, NonNull};
+use core::{
+    pin::Pin,
+    ptr::{self, NonNull},
+};
 
 /// A bitwise shift for the page size.
 pub const PAGE_SHIFT: usize = bindings::PAGE_SHIFT as usize;
@@ -211,6 +214,35 @@ impl Page {
             // There caller guarantees that there is no data race.
             unsafe { ptr::copy_nonoverlapping(src, dst, len) };
             Ok(())
+        })
+    }
+
+    /// Copies data from this page to another page at the specified offset.
+    ///
+    /// # Arguments
+    ///
+    /// - `dst` - The destination page to copy data to.
+    /// - `offset` - The byte offset within both pages where copying starts.
+    /// - `len` - The number of bytes to copy.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use kernel::page::Page;
+    /// # use kernel::alloc::flags::GFP_KERNEL;
+    /// let mut src_page = Page::alloc_page(GFP_KERNEL)?;
+    /// let mut dst_page = Page::alloc_page(GFP_KERNEL)?;
+    /// src_page.get_pin_mut().copy_to_page(dst_page.get_pin_mut(), 0, 1024)?;
+    /// # Ok::<(), kernel::error::Error>(())
+    /// ```
+    pub fn copy_to_page(
+        self: Pin<&mut Self>,
+        dst: Pin<&mut Self>,
+        offset: usize,
+        len: usize,
+    ) -> Result {
+        self.with_pointer_into_page(offset, len, |ptr| unsafe {
+            dst.write_raw(ptr, offset, len)
         })
     }
 
