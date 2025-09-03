@@ -9,6 +9,7 @@ int rust_helper_xa_err(void *entry)
 
 void rust_helper_xa_init_flags(struct xarray *xa, gfp_t flags)
 {
+	// TODO: This gives static lock class key, which confuses lockdep
 	return xa_init_flags(xa, flags);
 }
 
@@ -25,4 +26,21 @@ void rust_helper_xa_lock(struct xarray *xa)
 void rust_helper_xa_unlock(struct xarray *xa)
 {
 	return xa_unlock(xa);
+}
+
+void *rust_helper_xas_result(struct xa_state *xas, void *curr)
+{
+	if (xa_err(xas->xa_node))
+		curr = xas->xa_node;
+	return curr;
+}
+
+void *rust_helper_xa_zero_to_null(void *entry)
+{
+	return xa_is_zero(entry) ? NULL : entry;
+}
+
+int rust_helper_xas_error(const struct xa_state *xas)
+{
+	return xas_error(xas);
 }
