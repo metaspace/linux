@@ -11,7 +11,7 @@ use core::{
 };
 use pin_init::{PinInit, Wrapper, Zeroable};
 
-pub use crate::owned::{Ownable, Owned};
+pub use crate::owned::{Ownable, OwnableRefCounted, Owned};
 
 pub use crate::sync::aref::{ARef, AlwaysRefCounted, RefCounted};
 
