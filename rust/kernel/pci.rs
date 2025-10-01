@@ -13,8 +13,8 @@ use crate::{
     io::{Io, IoRaw},
     irq::{self, IrqRequest},
     str::CStr,
-    sync::aref::ARef,
-    types::Opaque,
+    sync::aref::{AlwaysRefCounted, RefCounted},
+    types::{ARef, Opaque},
     ThisModule,
 };
 use core::{
@@ -601,7 +601,7 @@ kernel::impl_device_context_into_aref!(Device);
 impl crate::dma::Device for Device<device::Core> {}
 
 // SAFETY: Instances of `Device` are always reference-counted.
-unsafe impl crate::sync::aref::AlwaysRefCounted for Device {
+unsafe impl RefCounted for Device {
     fn inc_ref(&self) {
         // SAFETY: The existence of a shared reference guarantees that the refcount is non-zero.
         unsafe { bindings::pci_dev_get(self.as_raw()) };
@@ -612,6 +612,10 @@ unsafe impl crate::sync::aref::AlwaysRefCounted for Device {
         unsafe { bindings::pci_dev_put(obj.cast().as_ptr()) }
     }
 }
+
+// SAFETY: We do not implement `Ownable`, thus it is okay to obtain an `ARef<Device>` from a
+// `&Device`.
+unsafe impl AlwaysRefCounted for Device {}
 
 impl<Ctx: device::DeviceContext> AsRef<device::Device<Ctx>> for Device<Ctx> {
     fn as_ref(&self) -> &device::Device<Ctx> {
