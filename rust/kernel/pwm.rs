@@ -628,7 +628,7 @@ impl<T: PwmOps> Chip<T> {
 }
 
 // SAFETY: Implements refcounting for `Chip` using the embedded `struct device`.
-unsafe impl<T: PwmOps> AlwaysRefCounted for Chip<T> {
+unsafe impl<T: PwmOps> RefCounted for Chip<T> {
     #[inline]
     fn inc_ref(&self) {
         // SAFETY: `self.0.get()` points to a valid `pwm_chip` because `self` exists.
@@ -649,6 +649,8 @@ unsafe impl<T: PwmOps> AlwaysRefCounted for Chip<T> {
         }
     }
 }
+
+unsafe impl<T: PwmOps> AlwaysRefCounted for Chip<T> {}
 
 // SAFETY: `Chip` is a wrapper around `*mut bindings::pwm_chip`. The underlying C
 // structure's state is managed and synchronized by the kernel's device model

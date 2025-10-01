@@ -9,8 +9,8 @@ use crate::{
     ffi::{c_int, c_long, c_uint},
     mm::MmWithUser,
     pid_namespace::PidNamespace,
-    sync::aref::ARef,
-    types::{NotThreadSafe, Opaque},
+    sync::aref::{AlwaysRefCounted, RefCounted},
+    types::{ARef, NotThreadSafe, Opaque},
 };
 use core::{
     cmp::{Eq, PartialEq},
@@ -348,7 +348,7 @@ impl CurrentTask {
 }
 
 // SAFETY: The type invariants guarantee that `Task` is always refcounted.
-unsafe impl crate::sync::aref::AlwaysRefCounted for Task {
+unsafe impl RefCounted for Task {
     #[inline]
     fn inc_ref(&self) {
         // SAFETY: The existence of a shared reference means that the refcount is nonzero.
@@ -361,6 +361,10 @@ unsafe impl crate::sync::aref::AlwaysRefCounted for Task {
         unsafe { bindings::put_task_struct(obj.cast().as_ptr()) }
     }
 }
+
+// SAFETY: We do not implement `Ownable`, thus it is okay to obtain an `ARef<Task>` from a
+// `&Task`.
+unsafe impl AlwaysRefCounted for Task {}
 
 impl Kuid {
     /// Get the current euid.
