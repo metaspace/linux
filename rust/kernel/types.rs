@@ -13,7 +13,7 @@ use pin_init::{PinInit, Wrapper, Zeroable};
 
 pub use crate::owned::{Ownable, Owned};
 
-pub use crate::sync::aref::{ARef, AlwaysRefCounted};
+pub use crate::sync::aref::{ARef, AlwaysRefCounted, RefCounted};
 
 /// Used to transfer ownership to and from foreign (non-Rust) languages.
 ///

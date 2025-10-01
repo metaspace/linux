@@ -5,9 +5,10 @@
 //! C header: [`include/linux/device.h`](srctree/include/linux/device.h)
 
 use crate::{
-    bindings, fmt,
-    sync::aref::ARef,
-    types::{ForeignOwnable, Opaque},
+    bindings,
+    fmt,
+    sync::aref::RefCounted,
+    types::{ARef, AlwaysRefCounted, ForeignOwnable, Opaque},
 };
 use core::{marker::PhantomData, ptr};
 
@@ -407,7 +408,7 @@ kernel::impl_device_context_deref!(unsafe { Device });
 kernel::impl_device_context_into_aref!(Device);
 
 // SAFETY: Instances of `Device` are always reference-counted.
-unsafe impl crate::sync::aref::AlwaysRefCounted for Device {
+unsafe impl RefCounted for Device {
     fn inc_ref(&self) {
         // SAFETY: The existence of a shared reference guarantees that the refcount is non-zero.
         unsafe { bindings::get_device(self.as_raw()) };
@@ -418,6 +419,10 @@ unsafe impl crate::sync::aref::AlwaysRefCounted for Device {
         unsafe { bindings::put_device(obj.cast().as_ptr()) }
     }
 }
+
+// SAFETY: We do not implement `Ownable`, thus it is okay to obtain an `ARef<Device>` from a
+// `&Device`.
+unsafe impl AlwaysRefCounted for Device {}
 
 // SAFETY: As by the type invariant `Device` can be sent to any thread.
 unsafe impl Send for Device {}
