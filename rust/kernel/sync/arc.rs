@@ -770,6 +770,10 @@ impl<T> UniqueArc<T> {
             inner: unsafe { Arc::from_inner(KBox::leak(inner).into()) },
         })
     }
+
+    pub fn as_ptr(&self) -> *const T {
+        Arc::as_ptr(&self.inner)
+    }
 }
 
 impl<T> UniqueArc<MaybeUninit<T>> {

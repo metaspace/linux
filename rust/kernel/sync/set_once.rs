@@ -123,3 +123,5 @@ impl<T> Drop for SetOnce<T> {
         }
     }
 }
+
+unsafe impl<T: Sync> Sync for SetOnce<T> {}
