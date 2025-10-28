@@ -6,12 +6,14 @@
 
 use crate::{
     bindings,
-    block::mq::{request::RequestDataWrapper, Request},
+    block::{
+        error::BlkResult,
+        mq::{request::RequestDataWrapper, IdleRequest, Request},
+    },
     error::{from_result, Result},
     prelude::*,
     sync::Refcount,
-    types::Owned,
-    types::{ARef, ForeignOwnable},
+    types::{ARef, ForeignOwnable, Owned},
 };
 use core::{marker::PhantomData, ptr::NonNull};
 use pin_init::PinInit;
@@ -61,9 +63,9 @@ pub trait Operations: Sized {
     fn queue_rq(
         hw_data: ForeignBorrowed<'_, Self::HwData>,
         queue_data: ForeignBorrowed<'_, Self::QueueData>,
-        rq: Owned<Request<Self>>,
+        rq: Owned<IdleRequest<Self>>,
         is_last: bool,
-    ) -> Result;
+    ) -> BlkResult;
 
     /// Called by the kernel to indicate that queued requests should be submitted.
     fn commit_rqs(
@@ -139,8 +141,9 @@ impl<T: Operations> OperationsVTable<T> {
         //    `struct request` and the private data is properly initialized.
         //  - `rq` will be alive until `blk_mq_end_request` is called and is
         //    reference counted by until then.
-        let mut rq =
-            unsafe { Owned::from_raw(NonNull::<Request<T>>::new_unchecked((*bd).rq.cast())) };
+        //let rq = unsafe { Owned::from_raw(NonNull::<Request<T>>::new_unchecked((*bd).rq.cast())) };
+
+        let rq = unsafe { IdleRequest::from_raw((*bd).rq) };
 
         // SAFETY: The safety requirement for this function ensure that `hctx`
         // is valid and that `driver_data` was produced by a call to
@@ -155,9 +158,6 @@ impl<T: Operations> OperationsVTable<T> {
         // `ForeignOwnable::from_foreign()` is only called when the tagset is
         // dropped, which happens after we are dropped.
         let queue_data = unsafe { T::QueueData::borrow(queue_data) };
-
-        // SAFETY: We have exclusive access and we just set the refcount above.
-        unsafe { rq.start_unchecked() };
 
         let ret = T::queue_rq(
             hw_data,
@@ -232,7 +232,6 @@ impl<T: Operations> OperationsVTable<T> {
         let hw_data = unsafe { T::HwData::borrow((*hctx).driver_data) };
         T::poll(hw_data).into()
     }
-
 
     /// This function is called by the C kernel. A pointer to this function is
     /// installed in the `blk_mq_ops` vtable for the driver.
