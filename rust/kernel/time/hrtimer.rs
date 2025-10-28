@@ -66,6 +66,20 @@
 //!
 //! A `restart` operation on a timer in the **stopped** state is equivalent to a
 //! `start` operation.
+//!
+//! A timer is **active** if it is either in the **started** or **running** states.
+
+// Implementation details
+//
+// The reasoning for adopting a handle based approach:
+// - If we explicitly drop the target of a timer callback in the timer callback, we
+//   may get a dangling reference.
+// - If the callback owns the last reference to the target, target may be dropped
+//   in non-sleepable context when the callback is finished.
+// - When dropping an object that is the target of an armed timer, we may drop
+//   fields accessed by the timer callback before we cancel the timer (drop order).
+//
+// By using a handle, we can make the handle own the callback target and avoid these problems.
 
 use super::{ClockSource, Delta, Instant};
 use crate::{prelude::*, types::Opaque};
@@ -245,6 +259,11 @@ impl<T> HrTimer<T> {
                 core::ptr::read_volatile(&raw const ((*c_timer_ptr).node.expires)),
             )
         }
+    }
+
+    /// Query the state of the timer. Returns `true` if the timer is in the started or running states.
+    pub fn active(&self) -> bool {
+        unsafe { bindings::hrtimer_active(self.timer.get()) }
     }
 }
 
