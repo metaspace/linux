@@ -183,6 +183,7 @@ impl configfs::GroupOperations for Config {
                 badblocks_once: 13,
                 badblocks_partial_io: 14,
                 cache_size_mib: 15,
+                mbps: 16,
             ],
         };
 
@@ -211,6 +212,7 @@ impl configfs::GroupOperations for Config {
                     bad_blocks_partial_io: false,
                     disk_storage: Arc::pin_init(DiskStorage::new(0, block_size as usize), GFP_KERNEL)?,
                     cache_size_mib: 0,
+                    mbps: 0,
                 }),
             }),
         ))
@@ -272,7 +274,7 @@ struct DeviceConfigInner {
     capacity_mib: u64,
     irq_mode: IRQMode,
     completion_time: time::Delta,
-    disk: Option<GenDisk<NullBlkDevice>>,
+    disk: Option<Arc<GenDisk<NullBlkDevice>>>,
     memory_backed: bool,
     submit_queues: u32,
     home_node: i32,
@@ -283,6 +285,7 @@ struct DeviceConfigInner {
     bad_blocks_partial_io: bool,
     cache_size_mib: u64,
     disk_storage: Arc<DiskStorage>,
+    mbps: u32,
 }
 
 #[vtable]
@@ -322,6 +325,7 @@ impl configfs::AttributeOperations<0> for DeviceConfig {
                 guard.bad_blocks_once,
                 guard.bad_blocks_partial_io,
                 guard.disk_storage.clone(),
+                (guard.mbps as u64) * 2u64.pow(20),
             )?);
             guard.powered = true;
         } else if guard.powered && !power_op {
@@ -333,7 +337,6 @@ impl configfs::AttributeOperations<0> for DeviceConfig {
     }
 }
 
-// DiskStorage::new(cache_size_mib << 20, block_size as usize),
 configfs_simple_field!(DeviceConfig, 1, block_size, u32, check GenDiskBuilder::validate_block_size);
 configfs_simple_bool_field!(DeviceConfig, 2, rotational);
 configfs_simple_field!(DeviceConfig, 3, capacity_mib, u64);
@@ -467,3 +470,5 @@ configfs_attribute!(DeviceConfig, 15,
         Ok(())
     })
 );
+
+configfs_simple_field!(DeviceConfig, 16, mbps, u32);

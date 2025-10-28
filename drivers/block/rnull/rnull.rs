@@ -16,24 +16,29 @@ use kernel::{
         self,
         badblocks::{self, BadBlocks},
         bio::Segment,
+        error::BlkResult,
         mq::{
             self,
-            gen_disk::{self, GenDisk},
+            gen_disk::{self, GenDisk, GenDiskRef},
             Operations, TagSet,
         },
         SECTOR_SHIFT,
     },
     error::{code, Result},
-    ffi, new_mutex, new_spinlock,
+    ffi, impl_has_hr_timer, new_mutex, new_spinlock,
     prelude::*,
+    revocable::Revocable,
     str::CString,
     sync::{
         aref::ARef,
         atomic::{ordering, Atomic},
-        Arc, Mutex, SpinLock, SpinLockGuard,
+        Arc, ArcBorrow, Mutex, SetOnce, SpinLock, SpinLockGuard,
     },
     time::{
-        hrtimer::{HrTimerCallback, HrTimerCallbackContext, HrTimerPointer, HrTimerRestart},
+        hrtimer::{
+            self, ArcHrTimerHandle, HrTimer, HrTimerCallback, HrTimerCallbackContext,
+            HrTimerPointer, HrTimerRestart,
+        },
         Delta,
     },
     types::{BorrowIterator, OwnableRefCounted, Owned},
@@ -96,6 +101,10 @@ module! {
             default: 0,
             description: "No IO scheduler",
         },
+        mbps: u32 {
+            default: 0,
+            description: "Max bandwidth in MiB/s. 0 means no limit.",
+        },
     },
 }
 
@@ -104,7 +113,7 @@ struct NullBlkModule {
     #[pin]
     configfs_subsystem: kernel::configfs::Subsystem<configfs::Config>,
     #[pin]
-    param_disks: Mutex<KVec<GenDisk<NullBlkDevice>>>,
+    param_disks: Mutex<KVec<Arc<GenDisk<NullBlkDevice>>>>,
 }
 
 impl kernel::InPlaceModule for NullBlkModule {
@@ -141,6 +150,7 @@ impl kernel::InPlaceModule for NullBlkModule {
                     false,
                     false,
                     Arc::pin_init(DiskStorage::new(0, block_size as usize), GFP_KERNEL)?,
+                    (*module_parameters::mbps.value()) as u64 * 2u64.pow(20),
                 )?;
                 disks.push(disk, GFP_KERNEL)?;
             }
@@ -165,9 +175,18 @@ struct NullBlkDevice {
     bad_blocks: Arc<BadBlocks>,
     bad_blocks_once: bool,
     bad_blocks_partial_io: bool,
+    bandwidth_limit: u64,
+    #[pin]
+    bandwidth_timer: HrTimer<Self>,
+    bandwidth_bytes: Atomic<u64>,
+    #[pin]
+    bandwidth_timer_handle: SpinLock<Option<ArcHrTimerHandle<Self>>>,
+    disk: SetOnce<Arc<Revocable<GenDiskRef<Self>>>>,
 }
 
 impl NullBlkDevice {
+    const BANDWIDTH_TIMER_INTERVAL: Delta = Delta::from_millis(20);
+
     // TODO: Change to "attach"
     fn new(
         name: &CStr,
@@ -185,7 +204,8 @@ impl NullBlkDevice {
         bad_blocks_once: bool,
         bad_blocks_partial_io: bool,
         storage: Arc<DiskStorage>,
-    ) -> Result<GenDisk<Self>> {
+        bandwidth_limit: u64,
+    ) -> Result<Arc<GenDisk<Self>>> {
         let mut flags = mq::Flags::default();
 
         // TODO: lim.features |= BLK_FEAT_WRITE_CACHE;
@@ -208,7 +228,7 @@ impl NullBlkDevice {
             GFP_KERNEL,
         )?;
 
-        let queue_data = Box::try_pin_init(
+        let queue_data = Arc::try_pin_init(
             try_pin_init!(Self {
                 storage,
                 irq_mode,
@@ -218,6 +238,11 @@ impl NullBlkDevice {
                 bad_blocks,
                 bad_blocks_once,
                 bad_blocks_partial_io,
+                bandwidth_limit: bandwidth_limit / 50,
+                bandwidth_timer <- HrTimer::new(),
+                bandwidth_bytes: Atomic::new(0),
+                bandwidth_timer_handle <- new_spinlock!(None),
+                disk: SetOnce::new(),
             }),
             GFP_KERNEL,
         )?;
@@ -234,7 +259,10 @@ impl NullBlkDevice {
                 .max_hw_discard_sectors(ffi::c_uint::MAX >> block::SECTOR_SHIFT);
         }
 
-        builder.build(fmt!("{}", name.to_str()?), tagset, queue_data)
+        let disk = builder.build(fmt!("{}", name.to_str()?), tagset, queue_data)?;
+        let queue_data: ArcBorrow<'_, Self> = disk.queue_data();
+        queue_data.disk.populate(disk.get_ref());
+        Ok(disk)
     }
 
     fn preload<'b, 'c>(
@@ -419,6 +447,36 @@ impl NullBlkDevice {
     }
 }
 
+impl_has_hr_timer! {
+    impl HasHrTimer<Self> for NullBlkDevice {
+        mode: hrtimer::RelativeHardMode<kernel::time::Monotonic>,
+        field: self.bandwidth_timer,
+    }
+}
+
+impl HrTimerCallback for NullBlkDevice {
+    type Pointer<'a> = Arc<Self>;
+
+    fn run(
+        this: ArcBorrow<'_, Self>,
+        mut context: HrTimerCallbackContext<'_, Self>,
+    ) -> HrTimerRestart {
+        if this.bandwidth_bytes.load(ordering::Relaxed) == 0 {
+            return HrTimerRestart::NoRestart;
+        }
+
+        this.disk.as_ref().map(|disk| {
+            disk.try_access()
+                .map(|disk| disk.queue().start_stopped_hw_queues_async())
+        });
+
+        this.bandwidth_bytes.store(0, ordering::Relaxed);
+
+        context.forward_now(Self::BANDWIDTH_TIMER_INTERVAL);
+        HrTimerRestart::Restart
+    }
+}
+
 struct HwQueueContext {
     page: Option<KBox<disk_storage::NullBlockPage>>,
     preload: xarray::XArrayPreloadBuffer,
@@ -427,7 +485,7 @@ struct HwQueueContext {
 #[pin_data]
 struct Pdu {
     #[pin]
-    timer: kernel::time::hrtimer::HrTimer<Self>,
+    timer: HrTimer<Self>,
     error: Atomic<u32>,
 }
 
@@ -476,14 +534,14 @@ where
 
 #[vtable]
 impl Operations for NullBlkDevice {
-    type QueueData = Pin<KBox<Self>>;
+    type QueueData = Arc<Self>;
     type RequestData = Pdu;
     type TagSetData = ();
     type HwData = Pin<KBox<SpinLock<HwQueueContext>>>;
 
     fn new_request_data() -> impl PinInit<Self::RequestData> {
         pin_init!(Pdu {
-            timer <- kernel::time::hrtimer::HrTimer::new(),
+            timer <- HrTimer::new(),
             error: Atomic::new(0),
         })
     }
@@ -491,13 +549,40 @@ impl Operations for NullBlkDevice {
     #[inline(always)]
     fn queue_rq(
         hw_data: Pin<&SpinLock<HwQueueContext>>,
-        this: Pin<&Self>,
-        mut rq: Owned<mq::Request<Self>>,
+        this: ArcBorrow<'_, Self>,
+        rq: Owned<mq::IdleRequest<Self>>,
         _is_last: bool,
-    ) -> Result {
+    ) -> BlkResult {
         let mut sectors = rq.sectors();
 
-        Self::handle_bad_blocks(this.get_ref(), &mut rq, &mut sectors)?;
+        if this.bandwidth_limit != 0 {
+            if !this.bandwidth_timer.active() {
+                drop(this.bandwidth_timer_handle.lock().take());
+                let arc: Arc<_> = this.into();
+                *this.bandwidth_timer_handle.lock() =
+                    Some(arc.start(Self::BANDWIDTH_TIMER_INTERVAL));
+            }
+
+            if this
+                .bandwidth_bytes
+                .fetch_add(rq.bytes() as u64, ordering::Relaxed)
+                + (rq.bytes() as u64)
+                > this.bandwidth_limit
+            {
+                rq.queue().stop_hw_queues();
+                if this.bandwidth_bytes.load(ordering::Relaxed) <= this.bandwidth_limit {
+                    rq.queue().start_stopped_hw_queues_async();
+                }
+
+                return Err(kernel::block::error::code::BLK_STS_DEV_RESOURCE);
+            } else {
+            }
+        }
+
+        let mut rq = rq.start();
+
+        use core::ops::Deref;
+        Self::handle_bad_blocks(this.deref(), &mut rq, &mut sectors)?;
 
         if this.memory_backed {
             if rq.command() == bindings::req_op_REQ_OP_DISCARD {
@@ -519,7 +604,7 @@ impl Operations for NullBlkDevice {
         Ok(())
     }
 
-    fn commit_rqs(_hw_data: Pin<&SpinLock<HwQueueContext>>, _queue_data: Pin<&Self>) {}
+    fn commit_rqs(_hw_data: Pin<&SpinLock<HwQueueContext>>, _queue_data: ArcBorrow<'_, Self>) {}
 
     fn init_hctx(_tagset_data: (), _hctx_idx: u32) -> Result<Self::HwData> {
         KBox::pin_init(
