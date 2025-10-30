@@ -15,10 +15,11 @@ use core::{
 
 /// Type allocated and destroyed on the C side, but owned by Rust.
 ///
-/// Implementing this trait allows types to be referenced via the [`Owned<Self>`] pointer type. This
-/// is useful when it is desirable to tie the lifetime of the reference to an owned object, rather
-/// than pass around a bare reference. [`Ownable`] types can define custom drop logic that is
-/// executed when the owned reference [`Owned<Self>`] pointing to the object is dropped.
+/// Implementing this trait allows types to be referenced via the [`Owned<Self>`] pointer type.
+///  - This is useful when it is desirable to tie the lifetime of an object reference to an owned
+///    object, rather than pass around a bare reference.
+///  - [`Ownable`] types can define custom drop logic that is executed when the owned reference
+///    of type [`Owned<_>`] pointing to the object is dropped.
 ///
 /// Note: The underlying object is not required to provide internal reference counting, because it
 /// represents a unique, owned reference. If reference counting (on the Rust side) is required,
@@ -145,9 +146,7 @@ impl<T: Ownable> Owned<T> {
     ///   mutable reference requirements. That is, the kernel will not mutate or free the underlying
     ///   object and is okay with it being modified by Rust code.
     pub unsafe fn from_raw(ptr: NonNull<T>) -> Self {
-        Self {
-            ptr,
-        }
+        Self { ptr }
     }
 
     /// Consumes the [`Owned`], returning a raw pointer.
@@ -206,18 +205,18 @@ impl<T: Ownable> Drop for Owned<T> {
 ///
 /// ```
 /// # #![expect(clippy::disallowed_names)]
-/// use core::cell::Cell;
-/// use core::ptr::NonNull;
-/// use kernel::alloc::{flags, kbox::KBox, AllocError};
-/// use kernel::sync::aref::{ARef, RefCounted};
-/// use kernel::types::{Owned, Ownable, OwnableRefCounted};
+/// # use core::cell::Cell;
+/// # use core::ptr::NonNull;
+/// # use kernel::alloc::{flags, kbox::KBox, AllocError};
+/// # use kernel::sync::aref::{ARef, RefCounted};
+/// # use kernel::types::{Owned, Ownable, OwnableRefCounted};
 ///
 /// // Example internally refcounted struct.
 /// //
 /// // # Invariants
 /// //
 /// // - `refcount` is always non-zero for a valid object.
-/// // - `refcount` is >1 if there are more then 1 Rust references to it.
+/// // - `refcount` is >1 if there are more than 1 Rust reference to it.
 /// //
 /// struct Foo {
 ///     refcount: Cell<usize>,
@@ -278,7 +277,7 @@ impl<T: Ownable> Drop for Owned<T> {
 ///     }
 /// }
 ///
-/// // SAFETY: What out `release()` function does is safe of any valid `Self`.
+/// // SAFETY: This implementation of `release()` is safe for any valid `Self`.
 /// unsafe impl Ownable for Foo {
 ///     unsafe fn release(this: NonNull<Self>) {
 ///         // SAFETY: Using `dec_ref()` from [`RefCounted`] to release is okay, as the refcount is
