@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: GPL-2.0
 
-//! Unique reference types for objects with custom destructors. They should be used for C-allocated
-//! objects which by API-contract are owned by Rust, but need to be freed through the C API.
+//! Unique owned pointer types for objects with custom drop logic.
+//!
+//! These pointer types are useful for C-allocated objects which by API-contract
+//! are owned by Rust, but need to be freed through the C API.
 
 use core::{
-    marker::PhantomData,
     mem::ManuallyDrop,
     ops::{Deref, DerefMut},
     pin::Pin,
@@ -13,9 +14,10 @@ use core::{
 
 /// Type allocated and destroyed on the C side, but owned by Rust.
 ///
-/// Implementing this trait allows types to be wrapped in an [`Owned<Self>`]. Such types can
-/// define their own custom destructor function to be called when the [`Owned<Self>`] is
-/// dropped.
+/// Implementing this trait allows types to be referenced via the [`Owned<Self>`] pointer type. This
+/// is useful when it is desirable to tie the lifetime of the reference to an owned object, rather
+/// than pass around a bare reference. [`Ownable`] types can define custom drop logic that is
+/// executed when the owned reference [`Owned<Self>`] pointing to the object is dropped.
 ///
 /// Note: The underlying object is not required to provide internal reference counting, because it
 /// represents a unique, owned reference. If reference counting (on the Rust side) is required,
@@ -32,11 +34,11 @@ use core::{
 ///
 /// ```
 /// # #![expect(clippy::disallowed_names)]
-/// use core::cell::Cell;
-/// use core::ptr::NonNull;
-/// use kernel::sync::global_lock;
-/// use kernel::alloc::{flags, kbox::KBox, AllocError};
-/// use kernel::types::{Owned, Ownable};
+/// # use core::cell::Cell;
+/// # use core::ptr::NonNull;
+/// # use kernel::sync::global_lock;
+/// # use kernel::alloc::{flags, kbox::KBox, AllocError};
+/// # use kernel::types::{Owned, Ownable};
 ///
 /// // Let's count the allocations to see if freeing works.
 /// kernel::sync::global_lock! {
@@ -95,11 +97,11 @@ pub unsafe trait Ownable {
     ///
     /// Callers must ensure that:
     /// - `this` points to a valid `Self`.
-    /// - `*this` is no longer referenced after this call.
+    /// - `*this` is no longer used after this call.
     unsafe fn release(this: NonNull<Self>);
 }
 
-/// An owned reference to an [`Ownable`] object.
+/// An owned reference to an owned `T`.
 ///
 /// The [`Ownable`] is automatically freed or released when an instance of [`Owned`] is
 /// dropped.
@@ -110,7 +112,6 @@ pub unsafe trait Ownable {
 /// - The instance of `T` will stay alive at least as long as the [`Owned<T>`] is alive.
 pub struct Owned<T: Ownable> {
     ptr: NonNull<T>,
-    _p: PhantomData<T>,
 }
 
 // SAFETY: It is safe to send an [`Owned<T>`] to another thread when the underlying `T` is [`Send`],
@@ -144,7 +145,6 @@ impl<T: Ownable> Owned<T> {
     pub unsafe fn from_raw(ptr: NonNull<T>) -> Self {
         Self {
             ptr,
-            _p: PhantomData,
         }
     }
 
