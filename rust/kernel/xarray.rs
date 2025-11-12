@@ -10,6 +10,8 @@ use crate::{
     error::{to_result, Error, Result},
     ffi::c_void,
     prelude::{EBUSY, ENOMEM, ENOSPC},
+    str::CStr,
+    sync::LockClassKey,
     types::{ForeignOwnable, NotThreadSafe, Opaque},
 };
 use core::{
@@ -20,6 +22,19 @@ use core::{
     ptr::{null_mut, NonNull},
 };
 use pin_init::{pin_data, pin_init, pinned_drop, PinInit};
+
+/// Creates a [`XArray`] initialiser with the given name and a newly-created lock class.
+///
+/// It uses the name if one is given, otherwise it generates one based on the file name and line
+/// number.
+#[macro_export]
+macro_rules! new_xarray {
+    ($kind:expr $(, $name:literal)? $(,)?) => {
+        $crate::xarray::XArray::new(
+            $kind, $crate::optional_name!($($name)?), $crate::static_lock_class!())
+    };
+}
+pub use new_xarray;
 
 /// An array which efficiently maps sparse integer indices to owned objects.
 ///
@@ -34,10 +49,12 @@ use pin_init::{pin_data, pin_init, pinned_drop, PinInit};
 /// # Examples
 ///
 /// ```rust
+/// use core::pin::Pin;
 /// use kernel::alloc::KBox;
-/// use kernel::xarray::{AllocKind, XArray};
+/// use kernel::xarray::{new_xarray, AllocKind, XArray};
 ///
-/// let xa = KBox::pin_init(XArray::new(AllocKind::Alloc1), GFP_KERNEL)?;
+/// let xa: Pin<KBox<XArray<KBox<u32>>>> =
+///     KBox::pin_init(new_xarray!(AllocKind::Alloc1), GFP_KERNEL)?;
 ///
 /// let dead = KBox::new(0xdead, GFP_KERNEL)?;
 /// let beef = KBox::new(0xbeef, GFP_KERNEL)?;
@@ -326,7 +343,11 @@ impl<T: ForeignOwnable> XArray<T> {
     }
 
     /// Creates a new initializer for this type.
-    pub fn new(kind: AllocKind) -> impl PinInit<Self> {
+    pub fn new(
+        kind: AllocKind,
+        name: &'static CStr,
+        key: Pin<&'static LockClassKey>,
+    ) -> impl PinInit<Self> {
         let flags = match kind {
             AllocKind::Alloc => bindings::XA_FLAGS_ALLOC,
             AllocKind::Alloc1 => bindings::XA_FLAGS_ALLOC1,
@@ -335,8 +356,10 @@ impl<T: ForeignOwnable> XArray<T> {
             // SAFETY: `xa` is valid while the closure is called.
             //
             // INVARIANT: `xa` is initialized here to an empty, valid [`bindings::xarray`].
-            xa <- Opaque::ffi_init(|xa| unsafe {
-                bindings::xa_init_flags(xa, flags)
+            xa <- Opaque::ffi_init(|xa: *mut bindings::xarray| unsafe {
+                bindings::__spin_lock_init(&raw mut (*xa).xa_lock, name.as_ptr().cast(), key.as_ptr());
+                (*xa).xa_flags = flags;
+                (*xa).xa_head = null_mut();
             }),
             _p: PhantomData,
         })
@@ -372,8 +395,9 @@ impl<'a, T: ForeignOwnable> Guard<'a, T> {
     /// # Examples
     ///
     /// ```
-    /// # use kernel::{alloc::{flags::GFP_KERNEL, kbox::KBox}, xarray::{AllocKind, XArray}};
-    /// let xa = KBox::pin_init(XArray::new(AllocKind::Alloc), GFP_KERNEL)?;
+    /// # use core::pin::Pin;
+    /// # use kernel::{alloc::{flags::GFP_KERNEL, kbox::KBox}, xarray::{AllocKind, new_xarray, XArray}};
+    /// let xa: Pin<KBox<XArray<KBox<u32>>>>  = KBox::pin_init(new_xarray!(AllocKind::Alloc), GFP_KERNEL)?;
     ///
     /// let mut guard = xa.lock();
     /// assert_eq!(guard.contains_index(42), false);
@@ -389,7 +413,8 @@ impl<'a, T: ForeignOwnable> Guard<'a, T> {
     }
 
     fn load(&self, index: usize) -> Option<NonNull<c_void>> {
-        // TODO: Split out into separate commit. Old code took xa_lock even though we already hold it.
+        // TODO: Split out into separate commit. Old code took xa_lock even though we already hold
+        // it.
         let mut state = XArrayState::new(self, index);
         // SAFETY: `state.state` is always valid by the type invariant.
         let ptr = unsafe { bindings::xas_load(&raw mut state.state) };
@@ -416,8 +441,9 @@ impl<'a, T: ForeignOwnable> Guard<'a, T> {
     /// # Examples
     ///
     /// ```
-    /// # use kernel::{prelude::*, xarray::{AllocKind, XArray, Entry}};
-    /// let mut xa = KBox::pin_init(XArray::<KBox<u32>>::new(AllocKind::Alloc), GFP_KERNEL)?;
+    /// # use kernel::{prelude::*, xarray::{AllocKind, new_xarray, Entry, XArray}};
+    /// let mut xa: Pin<KBox<XArray<KBox<u32>>>> =
+    ///     KBox::pin_init(new_xarray!(AllocKind::Alloc), GFP_KERNEL)?;
     /// let mut guard = xa.lock();
     ///
     /// assert_eq!(guard.contains_index(42), false);
@@ -458,8 +484,9 @@ impl<'a, T: ForeignOwnable> Guard<'a, T> {
     /// # Examples
     ///
     /// ```
-    /// # use kernel::{prelude::*, xarray::{AllocKind, XArray}};
-    /// let mut xa = KBox::pin_init(XArray::<KBox<u32>>::new(AllocKind::Alloc), GFP_KERNEL)?;
+    /// # use kernel::{prelude::*, xarray::{AllocKind, new_xarray, XArray}};
+    /// let mut xa: Pin<KBox<XArray<KBox<u32>>>> =
+    ///     KBox::pin_init(new_xarray!(AllocKind::Alloc), GFP_KERNEL)?;
     /// let mut guard = xa.lock();
     ///
     /// guard.store(10, KBox::new(10u32, GFP_KERNEL)?, GFP_KERNEL)?;
@@ -488,8 +515,9 @@ impl<'a, T: ForeignOwnable> Guard<'a, T> {
     /// # Examples
     ///
     /// ```
-    /// # use kernel::{prelude::*, xarray::{AllocKind, XArray}};
-    /// let mut xa = KBox::pin_init(XArray::<KBox<u32>>::new(AllocKind::Alloc), GFP_KERNEL)?;
+    /// # use kernel::{prelude::*, xarray::{AllocKind, new_xarray, XArray}};
+    /// let mut xa: Pin<KBox<XArray<KBox<u32>>>> =
+    ///     KBox::pin_init(new_xarray!(AllocKind::Alloc), GFP_KERNEL)?;
     /// let mut guard = xa.lock();
     ///
     /// guard.store(10, KBox::new(10u32, GFP_KERNEL)?, GFP_KERNEL)?;
@@ -515,8 +543,9 @@ impl<'a, T: ForeignOwnable> Guard<'a, T> {
     /// # Examples
     ///
     /// ```
-    /// # use kernel::{prelude::*, xarray::{AllocKind, XArray}};
-    /// let mut xa = KBox::pin_init(XArray::<KBox<u32>>::new(AllocKind::Alloc), GFP_KERNEL)?;
+    /// # use kernel::{prelude::*, xarray::{AllocKind, new_xarray, XArray}};
+    /// let mut xa: Pin<KBox<XArray<KBox<u32>>>> =
+    ///     KBox::pin_init(new_xarray!(AllocKind::Alloc), GFP_KERNEL)?;
     /// let mut guard = xa.lock();
     ///
     /// guard.store(10, KBox::new(10u32, GFP_KERNEL)?, GFP_KERNEL)?;
@@ -535,7 +564,8 @@ impl<'a, T: ForeignOwnable> Guard<'a, T> {
     pub fn find_next_entry<'b>(&'b mut self, index: usize) -> Option<OccupiedEntry<'a, 'b, T>> {
         let mut state = XArrayState::new(self, index);
 
-        // SAFETY: `state.state` is properly initialized by XArrayState::new and the caller holds the lock.
+        // SAFETY: `state.state` is properly initialized by XArrayState::new and the caller holds
+        // the lock.
         let ptr = NonNull::new(unsafe { bindings::xas_find(&mut state.state, usize::MAX) })?;
 
         Some(OccupiedEntry { state, ptr })
@@ -549,8 +579,9 @@ impl<'a, T: ForeignOwnable> Guard<'a, T> {
     /// # Examples
     ///
     /// ```
-    /// # use kernel::{prelude::*, xarray::{AllocKind, XArray}};
-    /// let mut xa = KBox::pin_init(XArray::<KBox<u32>>::new(AllocKind::Alloc), GFP_KERNEL)?;
+    /// # use kernel::{prelude::*, xarray::{AllocKind, new_xarray, XArray}};
+    /// let mut xa: Pin<KBox<XArray<KBox<u32>>>> =
+    ///     KBox::pin_init(new_xarray!(AllocKind::Alloc), GFP_KERNEL)?;
     /// let mut guard = xa.lock();
     ///
     /// guard.store(100, KBox::new(42u32, GFP_KERNEL)?, GFP_KERNEL)?;
@@ -565,7 +596,8 @@ impl<'a, T: ForeignOwnable> Guard<'a, T> {
     ) -> Option<OccupiedEntry<'a, 'b, T>> {
         let mut state = XArrayState::new(self, index);
 
-        // SAFETY: `state.state` is properly initialized by XArrayState::new and the caller holds the lock.
+        // SAFETY: `state.state` is properly initialized by XArrayState::new and the caller holds
+        // the lock.
         let ptr = NonNull::new(unsafe { bindings::xas_find(&mut state.state, usize::MAX) })
             .or_else(|| {
                 state.state.xa_node = bindings::XAS_RESTART as *mut bindings::xa_node;
@@ -665,8 +697,9 @@ impl<'a, T: ForeignOwnable> Guard<'a, T> {
     /// # Examples
     ///
     /// ```
-    /// # use kernel::{prelude::*, xarray::{AllocKind, XArray}};
-    /// let mut xa = KBox::pin_init(XArray::<KBox<u32>>::new(AllocKind::Alloc), GFP_KERNEL)?;
+    /// # use kernel::{prelude::*, xarray::{AllocKind, new_xarray, XArray}};
+    /// let mut xa: Pin<KBox<XArray<KBox<u32>>>> =
+    ///     KBox::pin_init(new_xarray!(AllocKind::Alloc), GFP_KERNEL)?;
     /// let mut guard = xa.lock();
     ///
     /// assert_eq!(guard.get(42), None);
@@ -792,8 +825,9 @@ impl<T: ForeignOwnable> Entry<'_, '_, T> {
     /// # Examples
     ///
     /// ```
-    /// # use kernel::{prelude::*, xarray::{AllocKind, XArray, Entry}};
-    /// let mut xa = KBox::pin_init(XArray::<KBox<u32>>::new(AllocKind::Alloc), GFP_KERNEL)?;
+    /// # use kernel::{prelude::*, xarray::{AllocKind, new_xarray, Entry, XArray}};
+    /// let mut xa: Pin<KBox<XArray<KBox<u32>>>> =
+    ///     KBox::pin_init(new_xarray!(AllocKind::Alloc), GFP_KERNEL)?;
     /// let mut guard = xa.lock();
     ///
     /// let entry = guard.get_entry(42);
@@ -834,7 +868,8 @@ where
         let new = T::into_foreign(value).cast();
 
         loop {
-            // SAFETY: `self.state.state` is properly initialized and `new` came from `T::into_foreign`. We hold the xarray lock.
+            // SAFETY: `self.state.state` is properly initialized and `new` came from
+            // `T::into_foreign`. We hold the xarray lock.
             unsafe { bindings::xas_store(&mut self.state.state, new) };
 
             match self.state.status() {
@@ -874,8 +909,9 @@ where
     /// # Examples
     ///
     /// ```
-    /// # use kernel::{prelude::*, xarray::{AllocKind, XArray, Entry}};
-    /// let mut xa = KBox::pin_init(XArray::<KBox<u32>>::new(AllocKind::Alloc), GFP_KERNEL)?;
+    /// # use kernel::{prelude::*, xarray::{AllocKind, new_xarray, Entry, XArray}};
+    /// let mut xa: Pin<KBox<XArray<KBox<u32>>>> =
+    ///     KBox::pin_init(new_xarray!(AllocKind::Alloc), GFP_KERNEL)?;
     /// let mut guard = xa.lock();
     ///
     /// assert_eq!(guard.get(42), None);
@@ -912,8 +948,9 @@ where
     /// # Examples
     ///
     /// ```
-    /// # use kernel::{prelude::*, xarray::{AllocKind, XArray, Entry}};
-    /// let mut xa = KBox::pin_init(XArray::<KBox<u32>>::new(AllocKind::Alloc), GFP_KERNEL)?;
+    /// # use kernel::{prelude::*, xarray::{AllocKind, new_xarray, Entry, XArray}};
+    /// let mut xa: Pin<KBox<XArray<KBox<u32>>>> =
+    ///     KBox::pin_init(new_xarray!(AllocKind::Alloc), GFP_KERNEL)?;
     /// let mut guard = xa.lock();
     ///
     /// assert_eq!(guard.get(42), None);
@@ -947,8 +984,9 @@ where
     /// # Examples
     ///
     /// ```
-    /// # use kernel::{prelude::*, xarray::{AllocKind, XArray, Entry}};
-    /// let mut xa = KBox::pin_init(XArray::<KBox<u32>>::new(AllocKind::Alloc), GFP_KERNEL)?;
+    /// # use kernel::{prelude::*, xarray::{AllocKind, new_xarray, Entry, XArray}};
+    /// let mut xa: Pin<KBox<XArray<KBox<u32>>>> =
+    ///     KBox::pin_init(new_xarray!(AllocKind::Alloc), GFP_KERNEL)?;
     /// let mut guard = xa.lock();
     ///
     /// assert_eq!(guard.get(42), None);
@@ -986,8 +1024,9 @@ where
     /// # Examples
     ///
     /// ```
-    /// # use kernel::{prelude::*, xarray::{AllocKind, XArray, Entry}};
-    /// let mut xa = KBox::pin_init(XArray::<KBox<u32>>::new(AllocKind::Alloc), GFP_KERNEL)?;
+    /// # use kernel::{prelude::*, xarray::{AllocKind, new_xarray, Entry, XArray}};
+    /// let mut xa: Pin<KBox<XArray<KBox<u32>>>> =
+    ///     KBox::pin_init(new_xarray!(AllocKind::Alloc), GFP_KERNEL)?;
     /// let mut guard = xa.lock();
     ///
     /// guard.store(42, KBox::new(0x1337u32, GFP_KERNEL)?, GFP_KERNEL)?;
@@ -1028,8 +1067,9 @@ where
     /// # Examples
     ///
     /// ```
-    /// # use kernel::{prelude::*, xarray::{AllocKind, XArray, Entry}};
-    /// let mut xa = KBox::pin_init(XArray::<KBox<u32>>::new(AllocKind::Alloc), GFP_KERNEL)?;
+    /// # use kernel::{prelude::*, xarray::{AllocKind, new_xarray, Entry, XArray}};
+    /// let mut xa: Pin<KBox<XArray<KBox<u32>>>> =
+    ///     KBox::pin_init(new_xarray!(AllocKind::Alloc), GFP_KERNEL)?;
     /// let mut guard = xa.lock();
     ///
     /// guard.store(42, KBox::new(0x1337u32, GFP_KERNEL)?, GFP_KERNEL)?;
@@ -1049,8 +1089,9 @@ where
     /// # Examples
     ///
     /// ```
-    /// # use kernel::{prelude::*, xarray::{AllocKind, XArray, Entry}};
-    /// let mut xa = KBox::pin_init(XArray::<KBox<u32>>::new(AllocKind::Alloc), GFP_KERNEL)?;
+    /// # use kernel::{prelude::*, xarray::{AllocKind, new_xarray, Entry, XArray}};
+    /// let mut xa: Pin<KBox<XArray<KBox<u32>>>> =
+    ///     KBox::pin_init(new_xarray!(AllocKind::Alloc), GFP_KERNEL)?;
     /// let mut guard = xa.lock();
     ///
     /// guard.store(42, KBox::new(0x1337u32, GFP_KERNEL)?, GFP_KERNEL)?;
@@ -1096,8 +1137,9 @@ where
     /// # Examples
     ///
     /// ```
-    /// # use kernel::{prelude::*, xarray::{AllocKind, XArray, Entry}};
-    /// let mut xa = KBox::pin_init(XArray::<KBox<u32>>::new(AllocKind::Alloc), GFP_KERNEL)?;
+    /// # use kernel::{prelude::*, xarray::{AllocKind, new_xarray, Entry, XArray}};
+    /// let mut xa: Pin<KBox<XArray<KBox<u32>>>> =
+    ///     KBox::pin_init(new_xarray!(AllocKind::Alloc), GFP_KERNEL)?;
     /// let mut guard = xa.lock();
     ///
     /// guard.store(42, KBox::new(0x1337u32, GFP_KERNEL)?, GFP_KERNEL)?;
@@ -1123,8 +1165,9 @@ where
     /// # Examples
     ///
     /// ```
-    /// # use kernel::{prelude::*, xarray::{AllocKind, XArray, Entry}};
-    /// let mut xa = KBox::pin_init(XArray::<KBox<u32>>::new(AllocKind::Alloc), GFP_KERNEL)?;
+    /// # use kernel::{prelude::*, xarray::{AllocKind, new_xarray, Entry, XArray}};
+    /// let mut xa: Pin<KBox<XArray<KBox<u32>>>> =
+    ///     KBox::pin_init(new_xarray!(AllocKind::Alloc), GFP_KERNEL)?;
     /// let mut guard = xa.lock();
     ///
     /// guard.store(42, KBox::new(100u32, GFP_KERNEL)?, GFP_KERNEL)?;

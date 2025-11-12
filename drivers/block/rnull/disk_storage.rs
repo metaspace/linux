@@ -9,7 +9,7 @@ use kernel::{
         SpinLock, SpinLockGuard,
     },
     uapi::PAGE_SECTORS,
-    xarray::{self, XArray},
+    xarray::{self, new_xarray, XArray},
 };
 pub(crate) use page::NullBlockPage;
 
@@ -224,8 +224,8 @@ pub(crate) struct TreeContainer {
 impl TreeContainer {
     fn new() -> impl PinInit<Self> {
         pin_init!(TreeContainer {
-            disk_tree <- XArray::new(xarray::AllocKind::Alloc),
-            cache_tree <- XArray::new(xarray::AllocKind::Alloc),
+            disk_tree <- new_xarray!(xarray::AllocKind::Alloc, "disk_tree"),
+            cache_tree <- new_xarray!(xarray::AllocKind::Alloc, "cache_tree"),
         })
     }
 }
