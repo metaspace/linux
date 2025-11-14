@@ -551,6 +551,7 @@ where
 
     pub fn fetch_sub<Rhs, Ordering: ordering::Ordering>(&self, v: Rhs, _: Ordering) -> T
     where
+        // Types that support addition also support subtraction.
         T: AtomicAdd<Rhs>,
     {
         let v = T::rhs_into_delta(v);
