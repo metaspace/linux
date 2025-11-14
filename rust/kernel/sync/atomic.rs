@@ -548,4 +548,25 @@ where
         // SAFETY: `ret` comes from reading `self.0`, which is a valid `T` per type invariants.
         unsafe { from_repr(ret) }
     }
+
+    pub fn fetch_sub<Rhs, Ordering: ordering::Ordering>(&self, v: Rhs, _: Ordering) -> T
+    where
+        T: AtomicAdd<Rhs>,
+    {
+        let v = T::rhs_into_delta(v);
+
+        // INVARIANT: `self.0` is a valid `T` after `atomic_fetch_add*()` due to safety requirement
+        // of `AtomicAdd`.
+        let ret = {
+            match Ordering::TYPE {
+                OrderingType::Full => T::Repr::atomic_fetch_sub(&self.0, v),
+                OrderingType::Acquire => T::Repr::atomic_fetch_sub_acquire(&self.0, v),
+                OrderingType::Release => T::Repr::atomic_fetch_sub_release(&self.0, v),
+                OrderingType::Relaxed => T::Repr::atomic_fetch_sub_relaxed(&self.0, v),
+            }
+        };
+
+        // SAFETY: `ret` comes from reading `self.0`, which is a valid `T` per type invariants.
+        unsafe { from_repr(ret) }
+    }
 }
