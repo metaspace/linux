@@ -19,7 +19,7 @@ use kernel::{
     prelude::*,
     sync::{aref::ARef, Arc},
     time::{
-        hrtimer::{HrTimerCallback, HrTimerPointer, HrTimerRestart},
+        hrtimer::{HrTimerCallback, HrTimerCallbackContext, HrTimerPointer, HrTimerRestart},
         Delta,
     },
     types::{OwnableRefCounted, Owned},
@@ -94,7 +94,7 @@ struct Pdu {
 impl HrTimerCallback for Pdu {
     type Pointer<'a> = ARef<mq::Request<NullBlkDevice>>;
 
-    fn run(this: Self::Pointer<'_>) -> HrTimerRestart {
+    fn run(this: Self::Pointer<'_>, _context: HrTimerCallbackContext<'_, Self>) -> HrTimerRestart {
         OwnableRefCounted::try_from_shared(this)
             .map_err(|_e| kernel::error::code::EIO)
             .expect("Failed to complete request")
