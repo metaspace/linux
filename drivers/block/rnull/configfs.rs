@@ -108,6 +108,7 @@ impl configfs::GroupOperations for Config {
                 mbps: 16,
                 blocking: 17,
                 shared_tags: 18,
+                hw_queue_depth: 19
             ],
         };
 
@@ -142,6 +143,7 @@ impl configfs::GroupOperations for Config {
                     mbps: 0,
                     blocking: false,
                     shared_tags: false,
+                    hw_queue_depth: 64,
                 }),
             }),
             core::iter::empty(),
@@ -209,6 +211,7 @@ struct DeviceConfigInner {
     mbps: u32,
     blocking: bool,
     shared_tags: bool,
+    hw_queue_depth: u32,
 }
 
 #[vtable]
@@ -251,6 +254,7 @@ impl configfs::AttributeOperations<0> for DeviceConfig {
                 bandwidth_limit: u64::from(guard.mbps) * 2u64.pow(20),
                 blocking: guard.blocking,
                 shared_tags: guard.shared_tags,
+                hw_queue_depth: guard.hw_queue_depth,
             })?);
             guard.powered = true;
         } else if guard.powered && !power_op {
@@ -472,3 +476,4 @@ configfs_attribute!(DeviceConfig, 15,
 configfs_simple_field!(DeviceConfig, 16, mbps, u32);
 configfs_simple_bool_field!(DeviceConfig, 17, blocking);
 configfs_simple_bool_field!(DeviceConfig, 18, shared_tags);
+configfs_simple_field!(DeviceConfig, 19, hw_queue_depth, u32);
