@@ -109,6 +109,10 @@ module! {
             default: 0,
             description: "Register as a blocking blk-mq driver device",
         },
+        shared_tags: u8 {
+            default: 0,
+            description: "Share tag set between devices for blk-mq",
+        },
     },
 }
 
@@ -156,6 +160,7 @@ impl kernel::InPlaceModule for NullBlkModule {
                     Arc::pin_init(DiskStorage::new(0, block_size as usize), GFP_KERNEL)?,
                     (*module_parameters::mbps.value()) as u64 * 2u64.pow(20),
                     *module_parameters::blocking.value() != 0,
+                    *module_parameters::shared_tags.value() != 0,
                 )?;
                 disks.push(disk, GFP_KERNEL)?;
             }
@@ -169,6 +174,8 @@ impl kernel::InPlaceModule for NullBlkModule {
         })
     }
 }
+
+static SHARED_TAG_SET: SetOnce<Arc<TagSet<NullBlkDevice>>> = SetOnce::new();
 
 #[pin_data]
 struct NullBlkDevice {
@@ -211,6 +218,7 @@ impl NullBlkDevice {
         storage: Arc<DiskStorage>,
         bandwidth_limit: u64,
         blocking: bool,
+        shared_tagset: bool,
     ) -> Result<Arc<GenDisk<Self>>> {
         let mut flags = mq::Flags::default();
 
@@ -229,10 +237,20 @@ impl NullBlkDevice {
             return Err(code::EINVAL);
         }
 
-        let tagset = Arc::pin_init(
-            TagSet::new(submit_queues, (), 256, 1, home_node, flags),
-            GFP_KERNEL,
-        )?;
+        let tagset_ctor = || -> Result<Arc<_>> {
+            Ok(Arc::pin_init(
+                TagSet::new(submit_queues, (), 256, 1, home_node, flags),
+                GFP_KERNEL,
+            )?)
+        };
+
+        let tagset = if shared_tagset {
+            SHARED_TAG_SET
+                .as_ref_or_populate_with(tagset_ctor)?
+                .clone()
+        } else {
+            tagset_ctor()?
+        };
 
         let queue_data = Arc::try_pin_init(
             try_pin_init!(Self {
