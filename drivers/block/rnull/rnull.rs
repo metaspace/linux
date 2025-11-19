@@ -149,6 +149,10 @@ module! {
             default: 0,
             description: "Share tag set between devices for blk-mq",
         },
+        hw_queue_depth: u32 {
+            default: 64,
+            description:  "Queue depth for each hardware queue. Default: 64",
+        },
     },
 }
 
@@ -197,6 +201,7 @@ impl kernel::InPlaceModule for NullBlkModule {
                     bandwidth_limit: u64::from(*module_parameters::mbps.value()) * 2u64.pow(20),
                     blocking: *module_parameters::blocking.value() != 0,
                     shared_tags: *module_parameters::shared_tags.value() != 0,
+                    hw_queue_depth: *module_parameters::hw_queue_depth.value(),
                 })?;
                 disks.push(disk, GFP_KERNEL)?;
             }
@@ -230,6 +235,7 @@ struct NullBlkOptions<'a> {
     bandwidth_limit: u64,
     blocking: bool,
     shared_tags: bool,
+    hw_queue_depth: u32,
 }
 
 static SHARED_TAG_SET: SetOnce<Arc<TagSet<NullBlkDevice>>> = SetOnce::new();
@@ -276,6 +282,7 @@ impl NullBlkDevice {
             bandwidth_limit,
             blocking,
             shared_tags,
+            hw_queue_depth,
         } = options;
 
         let mut flags = mq::tag_set::Flags::default();
@@ -297,7 +304,7 @@ impl NullBlkDevice {
 
         let tagset_ctor = || -> Result<Arc<_>> {
             Arc::pin_init(
-                TagSet::new(submit_queues, (), 256, 1, home_node, flags),
+                TagSet::new(submit_queues, (), hw_queue_depth, 1, home_node, flags),
                 GFP_KERNEL,
             )
         };
