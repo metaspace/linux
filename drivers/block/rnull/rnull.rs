@@ -113,6 +113,10 @@ module! {
             default: 0,
             description: "Share tag set between devices for blk-mq",
         },
+        hw_queue_depth: u32 {
+            default: 64,
+            description:  "Queue depth for each hardware queue. Default: 64",
+        },
     },
 }
 
@@ -161,6 +165,7 @@ impl kernel::InPlaceModule for NullBlkModule {
                     (*module_parameters::mbps.value()) as u64 * 2u64.pow(20),
                     *module_parameters::blocking.value() != 0,
                     *module_parameters::shared_tags.value() != 0,
+                    *module_parameters::hw_queue_depth.value(),
                 )?;
                 disks.push(disk, GFP_KERNEL)?;
             }
@@ -219,6 +224,7 @@ impl NullBlkDevice {
         bandwidth_limit: u64,
         blocking: bool,
         shared_tagset: bool,
+        hw_queue_depth: u32,
     ) -> Result<Arc<GenDisk<Self>>> {
         let mut flags = mq::Flags::default();
 
@@ -239,7 +245,7 @@ impl NullBlkDevice {
 
         let tagset_ctor = || -> Result<Arc<_>> {
             Ok(Arc::pin_init(
-                TagSet::new(submit_queues, (), 256, 1, home_node, flags),
+                TagSet::new(submit_queues, (), hw_queue_depth, 1, home_node, flags),
                 GFP_KERNEL,
             )?)
         };
