@@ -23,6 +23,7 @@ use kernel::{
     bindings,
     build_assert, //
     error::{
+        code::*,
         to_result,
         Error,
         Result, //
@@ -40,6 +41,12 @@ use pin_init::{
     pinned_drop,
     PinInit, //
 };
+pub use preload::{
+    XArrayPreloadBuffer,
+    XArrayPreloadNode, //
+};
+
+mod preload;
 
 /// An array which efficiently maps sparse integer indices to owned objects.
 ///
@@ -166,7 +173,6 @@ impl<T: ForeignOwnable> XArray<T> {
     pub fn lock(&self) -> Guard<'_, T> {
         // SAFETY: `self.xa` is always valid by the type invariant.
         unsafe { bindings::xa_lock(self.xa.get()) };
-
         Guard {
             xa: self,
             _not_send: NotThreadSafe,
@@ -274,7 +280,7 @@ impl<'a, T: ForeignOwnable> Guard<'a, T> {
     ///
     /// match guard.get_entry(42) {
     ///     Entry::Vacant(entry) => {
-    ///         entry.insert(KBox::new(0x1337u32, GFP_KERNEL)?)?;
+    ///         entry.insert(KBox::new(0x1337u32, GFP_KERNEL)?, None)?;
     ///     }
     ///     Entry::Occupied(_) => unreachable!("We did not insert an entry yet"),
     /// }
@@ -487,6 +493,45 @@ impl<'a, T: ForeignOwnable> Guard<'a, T> {
             Ok(unsafe { T::try_from_foreign(old) })
         }
     }
+
+    /// Inserts a value and returns an occupied entry for further operations.
+    ///
+    /// If a value is already present, the operation fails.
+    ///
+    /// This method will not drop the XArray lock. If memory allocation is
+    /// required for the operation to succeed, the user should supply memory
+    /// through the `preload` argument.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use kernel::{prelude::*, xarray::{AllocKind, XArray}};
+    /// let mut xa = KBox::pin_init(XArray::<KBox<u32>>::new(AllocKind::Alloc), GFP_KERNEL)?;
+    /// let mut guard = xa.lock();
+    ///
+    /// assert_eq!(guard.get(42), None);
+    ///
+    /// let value = KBox::new(0x1337u32, GFP_KERNEL)?;
+    /// let entry = guard.insert_entry(42, value, None)?;
+    /// let borrowed = entry.into_mut();
+    /// assert_eq!(borrowed, &0x1337);
+    ///
+    /// # Ok::<(), kernel::error::Error>(())
+    /// ```
+    pub fn insert_entry<'b>(
+        &'b mut self,
+        index: usize,
+        value: T,
+        preload: Option<&mut XArrayPreloadBuffer>,
+    ) -> Result<OccupiedEntry<'a, 'b, T>, StoreError<T>> {
+        match self.get_entry(index) {
+            Entry::Vacant(entry) => entry.insert_entry(value, preload),
+            Entry::Occupied(_) => Err(StoreError {
+                error: EBUSY,
+                value,
+            }),
+        }
+    }
 }
 
 /// Internal state for XArray iteration and entry operations.
@@ -499,6 +544,15 @@ pub(crate) struct XArrayState<'a, 'b, T: ForeignOwnable> {
     /// while `Self` is live.
     _access: &'b Guard<'a, T>,
     state: bindings::xa_state,
+}
+
+impl<'a, 'b, T: ForeignOwnable> Drop for XArrayState<'a, 'b, T> {
+    fn drop(&mut self) {
+        if !self.state.xa_alloc.is_null() {
+            // SAFETY: `xa_alloc` is a valid pointer to a preallocated node when non-null.
+            drop(unsafe { XArrayPreloadNode::from_raw(self.state.xa_alloc) })
+        }
+    }
 }
 
 impl<'a, 'b, T: ForeignOwnable> XArrayState<'a, 'b, T> {
