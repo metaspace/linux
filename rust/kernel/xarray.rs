@@ -211,16 +211,12 @@ impl<T> From<StoreError<T>> for Error {
 }
 
 impl<'a, T: ForeignOwnable> Guard<'a, T> {
-    fn load<F, U>(&self, index: usize, f: F) -> Option<U>
-    where
-        F: FnOnce(NonNull<c_void>) -> U,
-    {
+    fn load(&self, index: usize) -> Option<NonNull<c_void>> {
         let mut state = XArrayState::new(self, index);
         // SAFETY: `state.state` is always valid by the type invariant of
         // `XArrayState`.
         let ptr = unsafe { bindings::xas_load(&raw mut state.state) };
-        let ptr = NonNull::new(ptr.cast())?;
-        Some(f(ptr))
+        NonNull::new(ptr)
     }
 
     /// Checks if the XArray contains an element at the specified index.
@@ -246,18 +242,17 @@ impl<'a, T: ForeignOwnable> Guard<'a, T> {
 
     /// Provides a reference to the element at the given index.
     pub fn get(&self, index: usize) -> Option<T::Borrowed<'_>> {
-        self.load(index, |ptr| {
-            // SAFETY: `ptr` came from `T::into_foreign`.
-            unsafe { T::borrow(ptr.as_ptr()) }
-        })
+        let ptr = self.load(index)?;
+        // SAFETY: `ptr` came from `T::into_foreign`.
+        Some(unsafe { T::borrow(ptr.as_ptr()) })
     }
 
     /// Provides a mutable reference to the element at the given index.
     pub fn get_mut(&mut self, index: usize) -> Option<T::BorrowedMut<'_>> {
-        self.load(index, |ptr| {
-            // SAFETY: `ptr` came from `T::into_foreign`.
-            unsafe { T::borrow_mut(ptr.as_ptr()) }
-        })
+        let ptr = self.load(index)?;
+
+        // SAFETY: `ptr` came from `T::into_foreign`.
+        Some(unsafe { T::borrow_mut(ptr.as_ptr()) })
     }
 
     /// Removes and returns the element at the given index.
