@@ -215,8 +215,10 @@ impl<'a, T: ForeignOwnable> Guard<'a, T> {
     where
         F: FnOnce(NonNull<c_void>) -> U,
     {
-        // SAFETY: `self.xa.xa` is always valid by the type invariant.
-        let ptr = unsafe { bindings::xa_load(self.xa.xa.get(), index) };
+        let mut state = XArrayState::new(self, index);
+        // SAFETY: `state.state` is always valid by the type invariant of
+        // `XArrayState`.
+        let ptr = unsafe { bindings::xas_load(&raw mut state.state) };
         let ptr = NonNull::new(ptr.cast())?;
         Some(f(ptr))
     }
@@ -327,7 +329,6 @@ impl<'a, T: ForeignOwnable> Guard<'a, T> {
 /// # Invariants
 ///
 /// - `state` is always a valid `bindings::xa_state`.
-#[expect(dead_code)]
 pub(crate) struct XArrayState<'a, 'b, T: ForeignOwnable> {
     /// Holds a reference to the lock guard to ensure the lock is not dropped
     /// while `Self` is live.
@@ -336,7 +337,6 @@ pub(crate) struct XArrayState<'a, 'b, T: ForeignOwnable> {
 }
 
 impl<'a, 'b, T: ForeignOwnable> XArrayState<'a, 'b, T> {
-    #[expect(dead_code)]
     fn new(access: &'b Guard<'a, T>, index: usize) -> Self {
         let ptr = access.xa.xa.get();
         // INVARIANT: We initialize `self.state` to a valid value below.
