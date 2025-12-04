@@ -7,8 +7,7 @@
 
 use super::LockClassKey;
 use crate::{
-    str::CStr,
-    types::{NotThreadSafe, Opaque, ScopeGuard},
+    str::CStr, try_pin_init, types::{NotThreadSafe, Opaque, ScopeGuard}
 };
 use core::{cell::UnsafeCell, marker::PhantomPinned, pin::Pin};
 use pin_init::{pin_data, pin_init, PinInit};
@@ -129,6 +128,18 @@ impl<T, B: Backend> Lock<T, B> {
     /// Constructs a new lock initialiser.
     pub fn new(t: T, name: &'static CStr, key: Pin<&'static LockClassKey>) -> impl PinInit<Self> {
         pin_init!(Self {
+            data: UnsafeCell::new(t),
+            _pin: PhantomPinned,
+            // SAFETY: `slot` is valid while the closure is called and both `name` and `key` have
+            // static lifetimes so they live indefinitely.
+            state <- Opaque::ffi_init(|slot| unsafe {
+                B::init(slot, name.as_char_ptr(), key.as_ptr())
+            }),
+        })
+    }
+
+    pub fn try_new(t: T, name: &'static CStr, key: Pin<&'static LockClassKey>) -> impl PinInit<Self, kernel::error::Error> {
+        try_pin_init!(Self {
             data: UnsafeCell::new(t),
             _pin: PhantomPinned,
             // SAFETY: `slot` is valid while the closure is called and both `name` and `key` have

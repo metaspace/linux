@@ -17,6 +17,15 @@ macro_rules! new_spinlock {
 }
 pub use new_spinlock;
 
+#[macro_export]
+macro_rules! try_new_spinlock {
+    ($inner:expr $(, $name:literal)? $(,)?) => {
+        $crate::sync::SpinLock::try_new(
+            $inner, $crate::optional_name!($($name)?), $crate::static_lock_class!())
+    };
+}
+pub use try_new_spinlock;
+
 /// A spinlock.
 ///
 /// Exposes the kernel's [`spinlock_t`]. When multiple CPUs attempt to lock the same spinlock, only

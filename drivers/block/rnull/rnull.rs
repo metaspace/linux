@@ -2,48 +2,88 @@
 
 //! This is a Rust implementation of the C null block driver.
 
+#![recursion_limit = "256"]
+
 mod configfs;
 mod disk_storage;
+mod util;
+#[cfg(CONFIG_BLK_DEV_ZONED)]
+mod zoned;
 
 use configfs::IRQMode;
 use core::option::Option::Some;
-use disk_storage::DiskStorage;
-use disk_storage::NullBlockPage;
-use disk_storage::TreeContainer;
+use disk_storage::{
+    DiskStorage,
+    NullBlockPage,
+    TreeContainer, //
+};
 use kernel::{
     bindings,
     block::{
         self,
-        badblocks::{self, BadBlocks},
+        badblocks::{
+            self,
+            BadBlocks, //
+        },
         bio::Segment,
         error::BlkResult,
         mq::{
             self,
-            gen_disk::{self, GenDisk, GenDiskRef},
-            Operations, TagSet,
+            gen_disk::{
+                self,
+                GenDisk,
+                GenDiskRef, //
+            },
+            Operations,
+            TagSet, //
         },
         SECTOR_SHIFT,
     },
-    error::{code, Result},
-    ffi, impl_has_hr_timer, new_mutex, new_spinlock,
+    error::{
+        code,
+        Result, //
+    },
+    ffi,
+    impl_has_hr_timer,
+    new_mutex,
+    new_spinlock,
     prelude::*,
     revocable::Revocable,
     str::CString,
     sync::{
-        atomic::{ordering, Atomic},
-        Arc, ArcBorrow, Mutex, SetOnce, SpinLock, SpinLockGuard,
+        atomic::{
+            ordering,
+            Atomic, //
+        },
+        Arc,
+        ArcBorrow,
+        Mutex,
+        SetOnce,
+        SpinLock,
+        SpinLockGuard, //
     },
     time::{
         hrtimer::{
-            self, ArcHrTimerHandle, HrTimer, HrTimerCallback, HrTimerCallbackContext,
-            HrTimerPointer, HrTimerRestart,
+            self,
+            ArcHrTimerHandle,
+            HrTimer,
+            HrTimerCallback,
+            HrTimerCallbackContext,
+            HrTimerPointer,
+            HrTimerRestart, //
         },
         Delta,
     },
-    types::{ARef, BorrowIterator, OwnableRefCounted, Owned},
-    xarray,
+    types::{
+        ARef,
+        BorrowIterator,
+        OwnableRefCounted,
+        Owned, //
+    },
+    xarray, //
 };
 use pin_init::PinInit;
+use util::*;
 
 module! {
     type: NullBlkModule,
@@ -116,6 +156,34 @@ module! {
             default: 64,
             description:  "Queue depth for each hardware queue. Default: 64",
         },
+        zoned: u8 {
+            default: 0,
+            description: "Make device as a host-managed zoned block device. Default: 0",
+        },
+        zone_size: u32 {
+            default: 256,
+            description: "Zone size in MB when block device is zoned. Must be power-of-two: Default: 256",
+        },
+        zone_capacity: u32 {
+            default: 0,
+            description: "Zone capacity in MB when block device is zoned. Can be less than or equal to zone size. Default: Zone size",
+        },
+        zone_nr_conv: u32 {
+            default: 0,
+            description: "Number of conventional zones when block device is zoned. Default: 0",
+        },
+        zone_max_open: u32 {
+            default: 0,
+            description: "Maximum number of open zones when block device is zoned. Default: 0 (no limit)",
+        },
+        zone_max_active: u32 {
+            default: 0,
+            description: "Maximum number of active zones when block device is zoned. Default: 0 (no limit)",
+        },
+        zone_append_max_sectors: u32 {
+            default: 0,
+            description: "Maximum size of a zone append command (in 512B sectors). Specify 0 for no zone append.",
+        },
     },
 }
 
@@ -144,10 +212,10 @@ impl kernel::InPlaceModule for NullBlkModule {
                     *module_parameters::submit_queues.value()
                 };
 
-                let block_size = *module_parameters::bs.value();
+                let block_size_bytes = *module_parameters::bs.value();
                 let disk = NullBlkDevice::new(
                     &name,
-                    block_size,
+                    block_size_bytes,
                     *module_parameters::rotational.value() != 0,
                     *module_parameters::gb.value() * 1024,
                     (*module_parameters::irqmode.value()).try_into()?,
@@ -160,11 +228,18 @@ impl kernel::InPlaceModule for NullBlkModule {
                     Arc::pin_init(BadBlocks::new(false), GFP_KERNEL)?,
                     false,
                     false,
-                    Arc::pin_init(DiskStorage::new(0, block_size as usize), GFP_KERNEL)?,
+                    Arc::pin_init(DiskStorage::new(0, block_size_bytes), GFP_KERNEL)?,
                     (*module_parameters::mbps.value()) as u64 * 2u64.pow(20),
                     *module_parameters::blocking.value() != 0,
                     *module_parameters::shared_tags.value() != 0,
                     *module_parameters::hw_queue_depth.value(),
+                    *module_parameters::zoned.value() != 0,
+                    *module_parameters::zone_size.value(),
+                    *module_parameters::zone_capacity.value(),
+                    *module_parameters::zone_nr_conv.value(),
+                    *module_parameters::zone_max_open.value(),
+                    *module_parameters::zone_max_active.value(),
+                    *module_parameters::zone_append_max_sectors.value(),
                 )?;
                 disks.push(disk, GFP_KERNEL)?;
             }
@@ -181,13 +256,23 @@ impl kernel::InPlaceModule for NullBlkModule {
 
 static SHARED_TAG_SET: SetOnce<Arc<TagSet<NullBlkDevice>>> = SetOnce::new();
 
+#[cfg(not(CONFIG_BLK_DEV_ZONED))]
+pub(crate) fn init_zone_descriptors(
+    zone_size_sectors: u32,
+    zone_capacity_sectors: u32,
+    zone_count: u32,
+    zone_nr_conv: u32,
+) -> Result<Pin<KBox<[Mutex<ZoneDescriptor>]>>> {
+    KBox::pin_init([], GFP_KERNEL)?
+}
+
 #[pin_data]
 struct NullBlkDevice {
     storage: Arc<DiskStorage>,
     irq_mode: IRQMode,
     completion_time: Delta,
     memory_backed: bool,
-    block_size: usize,
+    block_size_bytes: u32,
     bad_blocks: Arc<BadBlocks>,
     bad_blocks_once: bool,
     bad_blocks_partial_io: bool,
@@ -198,6 +283,64 @@ struct NullBlkDevice {
     #[pin]
     bandwidth_timer_handle: SpinLock<Option<ArcHrTimerHandle<Self>>>,
     disk: SetOnce<Arc<Revocable<GenDiskRef<Self>>>>,
+    #[pin]
+    zoned: ZoneOptions,
+}
+
+// TODO: Move this to the `zoned` module when `pin_init` allows us conditional
+// compilation in `try_pin_init!`.
+#[pin_data]
+struct ZoneOptions {
+    enabled: bool,
+    zones: Pin<KBox<[Mutex<zoned::ZoneDescriptor>]>>,
+    conventional_count: u32,
+    size_sectors: u32,
+    append_max_sectors: u32,
+    max_open: u32,
+    max_active: u32,
+    #[pin]
+    accounting: SpinLock<ZoneAccounting>,
+}
+
+impl ZoneOptions {
+    fn new(
+        enable: bool,
+        size_sectors: u32,
+        capacity_sectors: u32,
+        count: u32,
+        max_open: u32,
+        max_active: u32,
+        append_max_sectors: u32,
+        zone_nr_conv: u32
+    ) -> impl PinInit<Self, Error> {
+        try_pin_init!(Self {
+            enabled: enable,
+            zones: zoned::init_zone_descriptors(
+                size_sectors,
+                capacity_sectors,
+                count,
+                zone_nr_conv,
+            )?,
+            size_sectors,
+            append_max_sectors,
+            max_open,
+            max_active,
+            accounting <- new_spinlock!(ZoneAccounting {
+                implicit_open: 0,
+                explicit_open: 0,
+                closed: 0,
+                start_zone: zone_nr_conv,
+            }),
+            conventional_count: zone_nr_conv,
+        })
+    }
+}
+
+struct ZoneAccounting {
+    implicit_open: u32,
+    explicit_open: u32,
+    closed: u32,
+    start_zone: u32,
 }
 
 impl NullBlkDevice {
@@ -206,9 +349,9 @@ impl NullBlkDevice {
     // TODO: Change to "attach"
     fn new(
         name: &CStr,
-        block_size: u32,
+        block_size_bytes: u32,
         rotational: bool,
-        capacity_mib: u64,
+        device_capacity_mib: u64,
         irq_mode: IRQMode,
         completion_time: Delta,
         memory_backed: bool,
@@ -224,6 +367,13 @@ impl NullBlkDevice {
         blocking: bool,
         shared_tagset: bool,
         hw_queue_depth: u32,
+        zoned: bool,
+        zone_size_mib: u32,
+        zone_capacity_mib: u32,
+        mut zone_nr_conv: u32,
+        mut zone_max_open: u32,
+        mut zone_max_active: u32,
+        zone_append_max_sectors: u32,
     ) -> Result<Arc<GenDisk<Self>>> {
         let mut flags = mq::Flags::default();
 
@@ -250,12 +400,49 @@ impl NullBlkDevice {
         };
 
         let tagset = if shared_tagset {
-            SHARED_TAG_SET
-                .as_ref_or_populate_with(tagset_ctor)?
-                .clone()
+            SHARED_TAG_SET.as_ref_or_populate_with(tagset_ctor)?.clone()
         } else {
             tagset_ctor()?
         };
+
+        if !is_power_of_two(zone_size_mib) {
+            return Err(EINVAL);
+        }
+
+        if zone_capacity_mib > zone_size_mib {
+            return Err(EINVAL);
+        }
+
+        let zone_size_sectors = mib_to_sectors(zone_size_mib);
+        let device_capacity_sectors = mib_to_sectors(device_capacity_mib);
+        let zone_capacity_sectors = mib_to_sectors(zone_capacity_mib);
+        let zone_count: u32 = (align_up(device_capacity_sectors, zone_size_sectors.into())
+            >> zone_size_sectors.ilog2())
+        .try_into()?;
+
+        if zone_nr_conv >= zone_count {
+            zone_nr_conv = zone_count - 1;
+            pr_info!("changed the number of conventional zones to {zone_nr_conv}\n");
+        }
+
+        let zone_append_max_sectors =
+            align_down(zone_append_max_sectors, bytes_to_sectors(block_size_bytes))
+            .min(zone_capacity_sectors);
+
+        let seq_zone_count = zone_count - zone_nr_conv;
+
+        if zone_max_active >= seq_zone_count {
+            zone_max_active = 0;
+            pr_info!("zone_max_active limit disabled, limit >= zone count\n");
+        }
+
+        if zone_max_active != 0 && zone_max_open > zone_max_active {
+            zone_max_open = zone_max_active;
+            pr_info!("changed the maximum number of open zones to {zone_max_open}\n");
+        } else if zone_max_open >= seq_zone_count {
+            zone_max_open = 0;
+            pr_info!("zone_max_open limit disabled, limit >= zone count\n");
+        }
 
         let queue_data = Arc::try_pin_init(
             try_pin_init!(Self {
@@ -263,7 +450,7 @@ impl NullBlkDevice {
                 irq_mode,
                 completion_time,
                 memory_backed,
-                block_size: block_size as usize,
+                block_size_bytes,
                 bad_blocks,
                 bad_blocks_once,
                 bad_blocks_partial_io,
@@ -272,17 +459,31 @@ impl NullBlkDevice {
                 bandwidth_bytes: Atomic::new(0),
                 bandwidth_timer_handle <- new_spinlock!(None),
                 disk: SetOnce::new(),
+                zoned <- ZoneOptions::new(
+                    zoned,
+                    zone_size_sectors,
+                    zone_capacity_sectors,
+                    zone_count,
+                    zone_max_open,
+                    zone_max_active,
+                    zone_append_max_sectors,
+                    zone_nr_conv,
+                ),
             }),
             GFP_KERNEL,
         )?;
 
         let mut builder = gen_disk::GenDiskBuilder::new()
-            .capacity_sectors(capacity_mib << (20 - block::SECTOR_SHIFT))
-            .logical_block_size(block_size)?
-            .physical_block_size(block_size)?
+            .capacity_sectors(device_capacity_sectors)
+            .logical_block_size(block_size_bytes)?
+            .physical_block_size(block_size_bytes)?
+            .zoned(zoned)
+            .zone_size(zone_size_sectors)
+            .zone_append_max(zone_append_max_sectors)
             .rotational(rotational);
 
-        if memory_backed && discard {
+        // TODO: Warn on invalid discard configuration (zoned, memory)
+        if memory_backed && discard && !zoned {
             builder = builder
                 // Max IO size is u32::MAX bytes
                 .max_hw_discard_sectors(ffi::c_uint::MAX >> block::SECTOR_SHIFT);
@@ -297,7 +498,7 @@ impl NullBlkDevice {
     fn preload<'b, 'c>(
         tree_guard: &'b mut SpinLockGuard<'c, Pin<KBox<TreeContainer>>>,
         hw_data_guard: &'b mut SpinLockGuard<'c, HwQueueContext>,
-        block_size: usize,
+        block_size_bytes: u32,
     ) -> Result {
         let free_count = hw_data_guard.preload.free_count();
         if free_count > 0 {
@@ -314,10 +515,9 @@ impl NullBlkDevice {
         }
 
         if hw_data_guard.page.is_none() {
-            hw_data_guard.page =
-                Some(tree_guard.do_unlocked(|| {
-                    hw_data_guard.do_unlocked(|| NullBlockPage::new(block_size))
-                })?);
+            hw_data_guard.page = Some(tree_guard.do_unlocked(|| {
+                hw_data_guard.do_unlocked(|| NullBlockPage::new(block_size_bytes))
+            })?);
         }
 
         Ok(())
@@ -332,7 +532,7 @@ impl NullBlkDevice {
         mut segment: Segment<'_>,
     ) -> Result {
         while !segment.is_empty() {
-            Self::preload(&mut tree_guard, &mut hw_data_guard, self.block_size)?;
+            Self::preload(&mut tree_guard, &mut hw_data_guard, self.block_size_bytes)?;
 
             let mut access = self.storage.access(&mut tree_guard, &mut hw_data_guard);
             let page = access.get_write_page(sector)?;
@@ -364,31 +564,8 @@ impl NullBlkDevice {
                     sector += segment.copy_from_page(page.page(), page_offset as usize) as u64
                         >> block::SECTOR_SHIFT;
                 }
-                None => sector += segment.zero_page() as u64 >> block::SECTOR_SHIFT,
+                None => sector += bytes_to_sectors(segment.zero_page() as u64),
             }
-        }
-
-        Ok(())
-    }
-
-    fn discard(
-        &self,
-        hw_data: &Pin<&SpinLock<HwQueueContext>>,
-        mut sector: u64,
-        sectors: u32,
-    ) -> Result {
-        let mut tree_guard = self.storage.lock();
-        let mut hw_data_guard = hw_data.lock();
-
-        let mut access = self.storage.access(&mut tree_guard, &mut hw_data_guard);
-
-        let mut remaining_bytes = (sectors as usize) << SECTOR_SHIFT;
-
-        while remaining_bytes > 0 {
-            access.free_sector(sector);
-            let processed = remaining_bytes.min(self.block_size);
-            sector += (processed >> SECTOR_SHIFT) as u64;
-            remaining_bytes -= processed;
         }
 
         Ok(())
@@ -399,11 +576,11 @@ impl NullBlkDevice {
         &self,
         hw_data: &Pin<&SpinLock<HwQueueContext>>,
         rq: &mut Owned<mq::Request<Self>>,
+        command: mq::Command,
         sectors: u32,
     ) -> Result {
         let mut sector = rq.sector();
         let end_sector = sector + <u32 as Into<u64>>::into(sectors);
-        let command = rq.command();
 
         // TODO: Use `PerCpu` to get rid of this lock
         let mut hw_data_guard = hw_data.lock();
@@ -417,10 +594,10 @@ impl NullBlkDevice {
                     .len()
                     .min((end_sector - sector) as u32 >> SECTOR_SHIFT);
                 match command {
-                    bindings::req_op_REQ_OP_WRITE => {
+                    mq::Command::Write => {
                         self.write(&mut tree_guard, &mut hw_data_guard, sector, segment)?
                     }
-                    bindings::req_op_REQ_OP_READ => {
+                    mq::Command::Read => {
                         self.read(&mut tree_guard, &mut hw_data_guard, sector, segment)?
                     }
                     _ => (),
@@ -434,6 +611,35 @@ impl NullBlkDevice {
         }
 
         Ok(())
+    }
+
+    fn handle_regular_command(
+        &self,
+        hw_data: &Pin<&SpinLock<HwQueueContext>>,
+        rq: &mut Owned<mq::Request<Self>>,
+    ) -> Result {
+        let mut sectors = rq.sectors();
+
+        self.handle_bad_blocks(rq, &mut sectors)?;
+
+        if self.memory_backed {
+            if rq.command() == mq::Command::Discard {
+                self.storage.discard(&hw_data, rq.sector(), sectors);
+            } else {
+                self.transfer(&hw_data, rq, rq.command(), sectors)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    #[cfg(not(CONFIG_BLK_DEV_ZONED))]
+    pub(crate) fn handle_zoned_command(
+        &self,
+        hw_data: &Pin<&SpinLock<HwQueueContext>>,
+        rq: &mut Owned<mq::Request<Self>>,
+    ) -> Result {
+        Err(ENOTSUPP)
     }
 
     fn handle_bad_blocks(&self, rq: &mut Owned<mq::Request<Self>>, sectors: &mut u32) -> Result {
@@ -451,7 +657,7 @@ impl NullBlkDevice {
                     }
 
                     if self.bad_blocks_partial_io {
-                        let block_size_sectors = (self.block_size >> SECTOR_SHIFT) as u64;
+                        let block_size_sectors = bytes_to_sectors(self.block_size_bytes) as u64;
                         range.start = align_down(range.start, block_size_sectors);
                         if start < range.start {
                             *sectors = (range.start - start) as u32;
@@ -537,30 +743,6 @@ kernel::impl_has_hr_timer! {
     }
 }
 
-fn is_power_of_two<T>(value: T) -> bool
-where
-    T: core::ops::Sub<T, Output = T>,
-    T: core::ops::BitAnd<Output = T>,
-    T: core::cmp::PartialOrd<T>,
-    T: Copy,
-    T: From<u8>,
-{
-    (value > 0u8.into()) && (value & (value - 1u8.into())) == 0u8.into()
-}
-
-fn align_down<T>(value: T, to: T) -> T
-where
-    T: core::ops::Sub<T, Output = T>,
-    T: core::ops::Not<Output = T>,
-    T: core::ops::BitAnd<Output = T>,
-    T: core::cmp::PartialOrd<T>,
-    T: Copy,
-    T: From<u8>,
-{
-    debug_assert!(is_power_of_two(to));
-    value & !(to - 1u8.into())
-}
-
 #[vtable]
 impl Operations for NullBlkDevice {
     type QueueData = Arc<Self>;
@@ -582,8 +764,6 @@ impl Operations for NullBlkDevice {
         rq: Owned<mq::IdleRequest<Self>>,
         _is_last: bool,
     ) -> BlkResult {
-        let mut sectors = rq.sectors();
-
         if this.bandwidth_limit != 0 {
             if !this.bandwidth_timer.active() {
                 drop(this.bandwidth_timer_handle.lock().take());
@@ -604,21 +784,19 @@ impl Operations for NullBlkDevice {
                 }
 
                 return Err(kernel::block::error::code::BLK_STS_DEV_RESOURCE);
-            } else {
             }
         }
 
+        // TODO: handle flush
+        // TODO: handle poll
+        // TODO: fake timeout?
+
         let mut rq = rq.start();
 
-        use core::ops::Deref;
-        Self::handle_bad_blocks(this.deref(), &mut rq, &mut sectors)?;
-
-        if this.memory_backed {
-            if rq.command() == bindings::req_op_REQ_OP_DISCARD {
-                this.discard(&hw_data, rq.sector(), sectors)?;
-            } else {
-                this.transfer(&hw_data, &mut rq, sectors)?;
-            }
+        if this.zoned.enabled {
+            this.handle_zoned_command(&hw_data, &mut rq)?;
+        } else {
+            this.handle_regular_command(&hw_data, &mut rq)?;
         }
 
         match this.irq_mode {
@@ -634,6 +812,10 @@ impl Operations for NullBlkDevice {
     }
 
     fn commit_rqs(_hw_data: Pin<&SpinLock<HwQueueContext>>, _queue_data: ArcBorrow<'_, Self>) {}
+
+    // TODO: queue_rqs
+    // TODO: map_queues
+    // TODO: poll
 
     fn init_hctx(_tagset_data: (), _hctx_idx: u32) -> Result<Self::HwData> {
         KBox::pin_init(
@@ -651,5 +833,15 @@ impl Operations for NullBlkDevice {
                 .map_err(|_e| kernel::error::code::EIO)
                 .expect("Failed to complete request"),
         )
+    }
+
+    #[cfg(CONFIG_BLK_DEV_ZONED)]
+    fn report_zones(
+        disk: &GenDiskRef<Self>,
+        sector: u64,
+        nr_zones: u32,
+        callback: impl Fn(*mut bindings::blk_zone, u32) -> Result,
+    ) -> Result<u32> {
+        Self::report_zones_internal(disk, sector, nr_zones, callback)
     }
 }
