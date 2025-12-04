@@ -124,6 +124,7 @@ mod tag_set;
 
 pub use operations::Operations;
 pub use request::IdleRequest;
+pub use request::Command;
 pub use request::Request;
 pub use request::RequestTimerHandle;
 pub use request_queue::RequestQueue;

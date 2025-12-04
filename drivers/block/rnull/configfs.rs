@@ -148,7 +148,7 @@ impl AttributeOperations<0> for Config {
         let mut writer = kernel::str::Formatter::new(page);
         writer.write_str(
             "blocksize,size,rotational,irqmode,completion_nsec,memory_backed\
-             submit_queues,use_per_node_hctx,discard,blocking,shared_tags\n",
+             submit_queues,use_per_node_hctx,discard,blocking,shared_tags,zoned,zone_size,zone_capacity\n",
         )?;
         Ok(writer.bytes_written())
     }
@@ -186,7 +186,14 @@ impl configfs::GroupOperations for Config {
                 mbps: 16,
                 blocking: 17,
                 shared_tags: 18,
-                hw_queue_depth: 19
+                hw_queue_depth: 19,
+                zoned: 20,
+                zone_size: 21,
+                zone_capacity: 22,
+                zone_nr_conv: 23,
+                zone_max_open: 24,
+                zone_max_active: 25,
+                zone_append_max_sectors: 26,
             ],
         };
 
@@ -213,12 +220,19 @@ impl configfs::GroupOperations for Config {
                     bad_blocks: Arc::pin_init(BadBlocks::new(false), GFP_KERNEL)?,
                     bad_blocks_once: false,
                     bad_blocks_partial_io: false,
-                    disk_storage: Arc::pin_init(DiskStorage::new(0, block_size as usize), GFP_KERNEL)?,
+                    disk_storage: Arc::pin_init(DiskStorage::new(0, block_size), GFP_KERNEL)?,
                     cache_size_mib: 0,
                     mbps: 0,
                     blocking: false,
                     shared_tags: false,
                     hw_queue_depth: 64,
+                    zoned: false,
+                    zone_size_mib: 256,
+                    zone_capacity_mib: 0,
+                    zone_nr_conv: 0,
+                    zone_max_open: 0,
+                    zone_max_active: 0,
+                    zone_append_max_sectors: u32::MAX,
                 }),
             }),
         ))
@@ -295,6 +309,13 @@ struct DeviceConfigInner {
     blocking: bool,
     shared_tags: bool,
     hw_queue_depth: u32,
+    zoned: bool,
+    zone_size_mib: u32,
+    zone_capacity_mib: u32,
+    zone_nr_conv: u32,
+    zone_max_open: u32,
+    zone_max_active: u32,
+    zone_append_max_sectors: u32,
 }
 
 #[vtable]
@@ -338,6 +359,13 @@ impl configfs::AttributeOperations<0> for DeviceConfig {
                 guard.blocking,
                 guard.shared_tags,
                 guard.hw_queue_depth,
+                guard.zoned,
+                guard.zone_size_mib,
+                guard.zone_capacity_mib,
+                guard.zone_nr_conv,
+                guard.zone_max_open,
+                guard.zone_max_active,
+                guard.zone_append_max_sectors,
             )?);
             guard.powered = true;
         } else if guard.powered && !power_op {
@@ -349,7 +377,7 @@ impl configfs::AttributeOperations<0> for DeviceConfig {
     }
 }
 
-configfs_simple_field!(DeviceConfig, 1, block_size, u32, check GenDiskBuilder::validate_block_size);
+configfs_simple_field!(DeviceConfig, 1, block_size, u32, check GenDiskBuilder::<NullBlkDevice>::validate_block_size);
 configfs_simple_bool_field!(DeviceConfig, 2, rotational);
 configfs_simple_field!(DeviceConfig, 3, capacity_mib, u64);
 configfs_simple_field!(DeviceConfig, 4, irq_mode, IRQMode);
@@ -477,7 +505,7 @@ configfs_attribute!(DeviceConfig, 15,
         let text = core::str::from_utf8(page)?.trim();
         let value = text.parse::<u64>().map_err(|_| EINVAL)?;
         let mut guard = this.data.lock();
-        guard.disk_storage = Arc::pin_init(DiskStorage::new(value, guard.block_size as usize), GFP_KERNEL)?;
+        guard.disk_storage = Arc::pin_init(DiskStorage::new(value, guard.block_size), GFP_KERNEL)?;
         guard.cache_size_mib = value;
         Ok(())
     })
@@ -487,3 +515,10 @@ configfs_simple_field!(DeviceConfig, 16, mbps, u32);
 configfs_simple_bool_field!(DeviceConfig, 17, blocking);
 configfs_simple_bool_field!(DeviceConfig, 18, shared_tags);
 configfs_simple_field!(DeviceConfig, 19, hw_queue_depth, u32);
+configfs_simple_bool_field!(DeviceConfig, 20, zoned);
+configfs_simple_field!(DeviceConfig, 21, zone_size_mib, u32);
+configfs_simple_field!(DeviceConfig, 22, zone_capacity_mib, u32);
+configfs_simple_field!(DeviceConfig, 23, zone_nr_conv, u32);
+configfs_simple_field!(DeviceConfig, 24, zone_max_open, u32);
+configfs_simple_field!(DeviceConfig, 25, zone_max_active, u32);
+configfs_simple_field!(DeviceConfig, 26, zone_append_max_sectors, u32);

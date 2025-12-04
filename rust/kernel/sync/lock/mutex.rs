@@ -17,6 +17,15 @@ macro_rules! new_mutex {
 }
 pub use new_mutex;
 
+#[macro_export]
+macro_rules! try_new_mutex {
+    ($inner:expr $(, $name:literal)? $(,)?) => {
+        $crate::sync::Mutex::try_new(
+            $inner, $crate::optional_name!($($name)?), $crate::static_lock_class!())
+    };
+}
+pub use try_new_mutex;
+
 /// A mutual exclusion primitive.
 ///
 /// Exposes the kernel's [`struct mutex`]. When multiple threads attempt to lock the same mutex,

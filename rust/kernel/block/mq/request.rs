@@ -17,12 +17,15 @@ use crate::{
     },
     types::{ForeignOwnable, Opaque, Ownable, OwnableRefCounted, Owned},
 };
-use core::{ffi::c_void, marker::PhantomData, ops::Deref, ptr::NonNull, sync::atomic::Ordering};
+use core::{ffi::c_void, marker::PhantomData, ops::Deref, pin::Pin, ptr::NonNull, sync::atomic::Ordering};
 
 use crate::block::bio::Bio;
 use crate::block::bio::BioIterator;
 
 use super::RequestQueue;
+
+mod command;
+pub use command::Command;
 
 #[repr(transparent)]
 pub struct IdleRequest<T>(RequestInner<T>);
@@ -67,9 +70,13 @@ pub struct RequestInner<T>(Opaque<bindings::request>, PhantomData<T>);
 
 impl<T: Operations> RequestInner<T> {
     /// Get the command identifier for the request
-    pub fn command(&self) -> u32 {
+    fn command_raw(&self) -> u32 {
         // SAFETY: By C API contract and type invariant, `cmd_flags` is valid for read
         unsafe { (*self.0.get()).cmd_flags & ((1 << bindings::REQ_OP_BITS) - 1) }
+    }
+
+    pub fn command(&self) -> Command {
+        unsafe { Command::from_raw(self.command_raw()) }
     }
 
     /// Get the target sector for the request.
@@ -251,6 +258,14 @@ impl<T: Operations> Request<T> {
     pub fn data_ref(&self) -> &T::RequestData {
         &self.wrapper_ref().data
     }
+
+    /// Set the target sector for the request
+    #[inline(always)]
+    pub fn set_sector(self: Pin<&mut Self>, sector: u64) {
+        // SAFETY: By type invariant of `Self`, `self.0` is valid and live.
+        unsafe { (*self.0.0.get()).__sector = sector}
+    }
+
 }
 
 /// A wrapper around data stored in the private area of the C [`struct request`].

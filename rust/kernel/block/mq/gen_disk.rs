@@ -7,7 +7,7 @@
 
 use crate::{
     bindings,
-    block::mq::{Operations, RequestQueue, TagSet},
+    block::mq::{operations::OperationsVTable, Operations, RequestQueue, TagSet},
     error::{self, from_err_ptr, Result},
     fmt::{self, Write},
     prelude::*,
@@ -17,20 +17,24 @@ use crate::{
     sync::{Arc, UniqueArc},
     types::{ForeignOwnable, ScopeGuard},
 };
-use core::ptr::NonNull;
+use core::{marker::PhantomData, ptr::NonNull};
 
 /// A builder for [`GenDisk`].
 ///
 /// Use this struct to configure and add new [`GenDisk`] to the VFS.
-pub struct GenDiskBuilder {
+pub struct GenDiskBuilder<T> {
     rotational: bool,
     logical_block_size: u32,
     physical_block_size: u32,
     capacity_sectors: u64,
     max_hw_discard_sectors: u32,
+    zoned: bool,
+    zone_size_sectors: u32,
+    zone_append_max_sectors: u32,
+    _p: PhantomData<T>,
 }
 
-impl Default for GenDiskBuilder {
+impl<T> Default for GenDiskBuilder<T> {
     fn default() -> Self {
         Self {
             rotational: false,
@@ -38,11 +42,15 @@ impl Default for GenDiskBuilder {
             physical_block_size: bindings::PAGE_SIZE as u32,
             capacity_sectors: 0,
             max_hw_discard_sectors: 0,
+            zoned: false,
+            zone_size_sectors: 0,
+            zone_append_max_sectors: 0,
+            _p: PhantomData,
         }
     }
 }
 
-impl GenDiskBuilder {
+impl<T: Operations> GenDiskBuilder<T> {
     /// Create a new instance.
     pub fn new() -> Self {
         Self::default()
@@ -108,8 +116,23 @@ impl GenDiskBuilder {
         self
     }
 
+    pub fn zoned(mut self, enable: bool) -> Self {
+        self.zoned = enable;
+        self
+    }
+
+    pub fn zone_size(mut self, sectors: u32) -> Self {
+        self.zone_size_sectors = sectors;
+        self
+    }
+
+    pub fn zone_append_max(mut self, sectors: u32) -> Self {
+        self.zone_append_max_sectors = sectors;
+        self
+    }
+
     /// Build a new `GenDisk` and add it to the VFS.
-    pub fn build<T: Operations>(
+    pub fn build(
         self,
         name: fmt::Arguments<'_>,
         tagset: Arc<TagSet<T>>,
@@ -128,7 +151,17 @@ impl GenDiskBuilder {
         lim.physical_block_size = self.physical_block_size;
         lim.max_hw_discard_sectors = self.max_hw_discard_sectors;
         if self.rotational {
-            lim.features = bindings::BLK_FEAT_ROTATIONAL;
+            lim.features |= bindings::BLK_FEAT_ROTATIONAL;
+        }
+
+        if self.zoned {
+            if !T::HAS_REPORT_ZONES {
+                return Err(error::code::EINVAL);
+            }
+
+            lim.features |= bindings::BLK_FEAT_ZONED;
+            lim.chunk_sectors = self.zone_size_sectors;
+            lim.max_hw_zone_append_sectors = self.zone_append_max_sectors;
         }
 
         // SAFETY: `tagset.raw_tag_set()` points to a valid and initialized tag set
@@ -141,32 +174,8 @@ impl GenDiskBuilder {
             )
         })?;
 
-        const TABLE: bindings::block_device_operations = bindings::block_device_operations {
-            submit_bio: None,
-            open: None,
-            release: None,
-            ioctl: None,
-            compat_ioctl: None,
-            check_events: None,
-            unlock_native_capacity: None,
-            getgeo: None,
-            set_read_only: None,
-            swap_slot_free_notify: None,
-            report_zones: None,
-            devnode: None,
-            alternative_gpt_sector: None,
-            get_unique_id: None,
-            // TODO: Set to THIS_MODULE. Waiting for const_refs_to_static feature to
-            // be merged (unstable in rustc 1.78 which is staged for linux 6.10)
-            // <https://github.com/rust-lang/rust/issues/119618>
-            owner: core::ptr::null_mut(),
-            pr_ops: core::ptr::null_mut(),
-            free_disk: None,
-            poll_bio: None,
-        };
-
         // SAFETY: `gendisk` is a valid pointer as we initialized it above
-        unsafe { (*gendisk).fops = &TABLE };
+        unsafe { (*gendisk).fops = Self::build_vtable() };
 
         let mut writer = NullTerminatedFormatter::new(
             // SAFETY: `gendisk` points to a valid and initialized instance. We
@@ -181,14 +190,6 @@ impl GenDiskBuilder {
         // `struct gendisk`. `set_capacity` takes a lock to synchronize this
         // operation, so we will not race.
         unsafe { bindings::set_capacity(gendisk, self.capacity_sectors) };
-
-        crate::error::to_result(
-            // SAFETY: `gendisk` points to a valid and initialized instance of
-            // `struct gendisk`.
-            unsafe {
-                bindings::device_add_disk(core::ptr::null_mut(), gendisk, core::ptr::null_mut())
-            },
-        )?;
 
         recover_data.dismiss();
 
@@ -215,7 +216,57 @@ impl GenDiskBuilder {
             GFP_KERNEL,
         )?;
 
-        Ok(disk.into())
+        let disk: Arc<_> = disk.into();
+
+        unsafe { (*disk.gendisk).private_data = Arc::as_ptr(&disk).cast_mut().cast() };
+
+        #[cfg(CONFIG_BLK_DEV_ZONED)]
+        if self.zoned {
+            unsafe { bindings::blk_revalidate_disk_zones(gendisk) };
+        }
+
+        crate::error::to_result(
+            // SAFETY: `gendisk` points to a valid and initialized instance of
+            // `struct gendisk`.
+            unsafe {
+                bindings::device_add_disk(core::ptr::null_mut(), gendisk, core::ptr::null_mut())
+            },
+        )?;
+
+
+        Ok(disk)
+    }
+
+    const VTABLE: bindings::block_device_operations = bindings::block_device_operations {
+        submit_bio: None,
+        open: None,
+        release: None,
+        ioctl: None,
+        compat_ioctl: None,
+        check_events: None,
+        unlock_native_capacity: None,
+        getgeo: None,
+        set_read_only: None,
+        swap_slot_free_notify: None,
+        report_zones: if T::HAS_REPORT_ZONES {
+            Some(OperationsVTable::<T>::report_zones_callback)
+        } else {
+            None
+        },
+        devnode: None,
+        alternative_gpt_sector: None,
+        get_unique_id: None,
+        // TODO: Set to THIS_MODULE. Waiting for const_refs_to_static feature to
+        // be merged (unstable in rustc 1.78 which is staged for linux 6.10)
+        // <https://github.com/rust-lang/rust/issues/119618>
+        owner: core::ptr::null_mut(),
+        pr_ops: core::ptr::null_mut(),
+        free_disk: None,
+        poll_bio: None,
+    };
+
+    pub(crate) const fn build_vtable() -> &'static bindings::block_device_operations {
+        &Self::VTABLE
     }
 }
 
@@ -275,7 +326,10 @@ impl<T: Operations> Drop for GenDisk<T> {
 pub struct GenDiskRef<T: Operations>(NonNull<GenDisk<T>>);
 
 impl<T: Operations> GenDiskRef<T> {
-    unsafe fn set_ptr(&self) {}
+    pub(crate) unsafe fn from_ptr(ptr: NonNull<GenDisk<T>>) -> GenDiskRef<T> {
+        Self(ptr)
+    }
+
 }
 
 unsafe impl<T: Operations> Send for GenDiskRef<T> {}

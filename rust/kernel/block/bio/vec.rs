@@ -144,6 +144,8 @@ impl Segment<'_> {
     /// Copies  `PAGE_SIZE - (self.offset() % PAGE_SIZE` bytes of data to this
     /// segment starting at `self.offset()`. This call will advance offset and reduce length of
     /// `self`.
+    ///
+    /// Returns the number of bytes written to this segment.
     pub fn zero_page(&mut self) -> usize {
         let offset = self.offset() % PAGE_SIZE;
         let length = (PAGE_SIZE - offset).min(self.len() as usize);

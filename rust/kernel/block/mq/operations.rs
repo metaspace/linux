@@ -8,9 +8,9 @@ use crate::{
     bindings,
     block::{
         error::BlkResult,
-        mq::{request::RequestDataWrapper, IdleRequest, Request},
+        mq::{gen_disk::GenDiskRef, request::RequestDataWrapper, IdleRequest, Request},
     },
-    error::{from_result, Result},
+    error::{from_result, to_result, Result},
     prelude::*,
     sync::{aref::ARef, atomic::ordering, Refcount},
     types::{ForeignOwnable, Owned},
@@ -87,7 +87,19 @@ pub trait Operations: Sized {
     fn poll(_hw_data: ForeignBorrowed<'_, Self::HwData>) -> bool {
         build_error!(crate::error::VTABLE_DEFAULT_ERROR)
     }
+
+    fn report_zones(
+        disk: &GenDiskRef<Self>,
+        sector: u64,
+        nr_zones: u32,
+        callback: impl Fn(*mut bindings::blk_zone, u32) -> Result,
+    ) -> Result<u32> {
+        Err(ENOTSUPP)
+    }
 }
+
+type ReportZonesCallback =
+    Option<unsafe extern "C" fn(*mut bindings::blk_zone, u32, *mut c_void) -> i32>;
 
 /// A vtable for blk-mq to interact with a block device driver.
 ///
@@ -341,6 +353,19 @@ impl<T: Operations> OperationsVTable<T> {
         unsafe { core::ptr::drop_in_place(pdu) };
     }
 
+    pub(crate) unsafe extern "C" fn report_zones_callback(
+        disk: *mut bindings::gendisk,
+        sector: u64,
+        nr_zones: u32,
+        args: *mut bindings::blk_report_zones_args,
+    ) -> i32 {
+        let disk_ptr = disk;
+        let disk = unsafe { GenDiskRef::from_ptr(unsafe { NonNull::new_unchecked((*disk).private_data.cast()) }) };
+        from_result(|| T::report_zones(&disk, sector, nr_zones, |zone, idx| -> Result {
+            to_result(unsafe { bindings::disk_report_zone(disk_ptr, zone, idx, args) })
+        }).and_then(|v: u32| -> Result<_> { Ok(v.try_into()?)}))
+    }
+
     const VTABLE: bindings::blk_mq_ops = bindings::blk_mq_ops {
         queue_rq: Some(Self::queue_rq_callback),
         queue_rqs: None,
@@ -371,3 +396,5 @@ impl<T: Operations> OperationsVTable<T> {
         &Self::VTABLE
     }
 }
+
+pub struct ReportZoneData(*mut c_void);
