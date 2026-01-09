@@ -20,3 +20,10 @@ void rust_helper_bio_advance_iter_single(const struct bio *bio,
 {
 	bio_advance_iter_single(bio, iter, bytes);
 }
+
+bool rust_helper_blk_mq_add_to_batch(struct request *req,
+				     struct io_comp_batch *iob, bool is_error,
+				     void (*complete)(struct io_comp_batch *))
+{
+	return blk_mq_add_to_batch(req, iob, is_error, complete);
+}

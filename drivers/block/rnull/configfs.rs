@@ -148,7 +148,7 @@ impl AttributeOperations<0> for Config {
         let mut writer = kernel::str::Formatter::new(page);
         writer.write_str(
             "blocksize,size,rotational,irqmode,completion_nsec,memory_backed\
-             submit_queues,use_per_node_hctx,discard,blocking,shared_tags,zoned,zone_size,zone_capacity\n",
+             submit_queues,use_per_node_hctx,discard,blocking,shared_tags,zoned,zone_size,zone_capacity,poll_queues\n",
         )?;
         Ok(writer.bytes_written())
     }
@@ -194,6 +194,7 @@ impl configfs::GroupOperations for Config {
                 zone_max_open: 24,
                 zone_max_active: 25,
                 zone_append_max_sectors: 26,
+                poll_queues: 27,
             ],
         };
 
@@ -233,6 +234,7 @@ impl configfs::GroupOperations for Config {
                     zone_max_open: 0,
                     zone_max_active: 0,
                     zone_append_max_sectors: u32::MAX,
+                    poll_queues: 0,
                 }),
             }),
         ))
@@ -316,6 +318,7 @@ struct DeviceConfigInner {
     zone_max_open: u32,
     zone_max_active: u32,
     zone_append_max_sectors: u32,
+    poll_queues: u32,
 }
 
 #[vtable]
@@ -366,6 +369,7 @@ impl configfs::AttributeOperations<0> for DeviceConfig {
                 guard.zone_max_open,
                 guard.zone_max_active,
                 guard.zone_append_max_sectors,
+                guard.poll_queues,
             )?);
             guard.powered = true;
         } else if guard.powered && !power_op {
@@ -522,3 +526,17 @@ configfs_simple_field!(DeviceConfig, 23, zone_nr_conv, u32);
 configfs_simple_field!(DeviceConfig, 24, zone_max_open, u32);
 configfs_simple_field!(DeviceConfig, 25, zone_max_active, u32);
 configfs_simple_field!(DeviceConfig, 26, zone_append_max_sectors, u32);
+configfs_simple_field!(
+    DeviceConfig,
+    27,
+    poll_queues,
+    u32,
+    check | value | {
+        if value > kernel::num_possible_cpus() {
+            Err(kernel::error::code::EINVAL)
+        } else {
+            Ok(())
+        }
+    }
+
+);

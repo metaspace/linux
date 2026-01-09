@@ -4,12 +4,12 @@
 //!
 //! C header: [`include/linux/blk-mq.h`](srctree/include/linux/blk-mq.h)
 
-use core::pin::Pin;
+use core::{pin::Pin, ptr::NonNull};
 
 use crate::{
     bindings,
     block::mq::{operations::OperationsVTable, request::RequestDataWrapper, Operations},
-    error::{self, Result},
+    error::{self, Error, Result},
     try_pin_init,
     types::{ForeignOwnable, Opaque},
 };
@@ -87,7 +87,6 @@ impl<T: Operations> TagSet<T> {
         self.inner.get()
     }
 
-
     /// Create a `TagSet<T>` from a raw pointer.
     ///
     /// # Safety
@@ -99,6 +98,32 @@ impl<T: Operations> TagSet<T> {
         // SAFETY: By the safety requirements of this function, `ptr` is valid
         // for use as a reference for the duration of `'a`.
         unsafe { &*(ptr.cast::<Self>()) }
+    }
+
+    pub(crate) unsafe fn from_ptr_mut<'a>(ptr: *mut bindings::blk_mq_tag_set) -> Pin<&'a mut Self> {
+        let mref = unsafe { &mut *(ptr.cast::<Self>()) };
+        unsafe { Pin::new_unchecked(mref) }
+    }
+
+    pub fn update_maps(self: Pin<&mut Self>, mut cb: impl FnMut(QueueMap)) -> Result {
+        let nr_maps = unsafe { (*self.inner.get()).nr_maps };
+        for i in 0..nr_maps {
+            cb(QueueMap {
+                map: unsafe { &raw mut (*self.inner.get()).map[i as usize] },
+                kind: i.try_into()?,
+            });
+        }
+
+        Ok(())
+    }
+
+    pub fn hw_queue_count(&self) -> u32 {
+        unsafe { (*self.inner.get()).nr_hw_queues }
+    }
+
+    pub fn data(&self) -> <T::TagSetData as ForeignOwnable>::Borrowed<'_> {
+        let ptr = unsafe { (*self.inner.get()).driver_data };
+        unsafe { T::TagSetData::borrow(ptr) }
     }
 }
 
@@ -120,3 +145,47 @@ impl<T: Operations> PinnedDrop for TagSet<T> {
 
 unsafe impl<T: Operations> Sync for TagSet<T> {}
 unsafe impl<T: Operations> Send for TagSet<T> {}
+
+pub struct QueueMap {
+    map: *mut bindings::blk_mq_queue_map,
+    kind: QueueType,
+}
+
+impl QueueMap {
+    pub fn set_queue_count(&mut self, nr_queues: u32) {
+        unsafe { (*self.map).nr_queues = nr_queues }
+    }
+
+    pub fn set_offset(&mut self, offset: u32) {
+        unsafe { (*self.map).queue_offset = offset }
+    }
+
+    pub fn map_queues(&self) {
+        unsafe { bindings::blk_mq_map_queues(self.map) }
+    }
+
+    pub fn kind(&self) -> QueueType {
+        self.kind
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub enum QueueType {
+    Default = bindings::hctx_type_HCTX_TYPE_DEFAULT,
+    Read = bindings::hctx_type_HCTX_TYPE_READ,
+    Poll = bindings::hctx_type_HCTX_TYPE_POLL,
+}
+
+impl TryFrom<u32> for QueueType {
+    type Error = kernel::error::Error;
+
+    fn try_from(value: u32) -> core::result::Result<Self, Self::Error> {
+        match value {
+            bindings::hctx_type_HCTX_TYPE_DEFAULT => Ok(QueueType::Default),
+            bindings::hctx_type_HCTX_TYPE_READ => Ok(QueueType::Read),
+            bindings::hctx_type_HCTX_TYPE_POLL => Ok(QueueType::Poll),
+            _ => Err(kernel::error::code::EINVAL),
+        }
+    }
+}

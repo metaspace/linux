@@ -34,6 +34,7 @@ use kernel::{
                 GenDisk,
                 GenDiskRef, //
             },
+            IoCompletionBatch,
             Operations,
             TagSet, //
         },
@@ -184,6 +185,10 @@ module! {
             default: 0,
             description: "Maximum size of a zone append command (in 512B sectors). Specify 0 for no zone append.",
         },
+        poll_queues: u32 {
+            default: 0,
+            description: "Number of IOPOLL submission queues.",
+        },
     },
 }
 
@@ -240,6 +245,7 @@ impl kernel::InPlaceModule for NullBlkModule {
                     *module_parameters::zone_max_open.value(),
                     *module_parameters::zone_max_active.value(),
                     *module_parameters::zone_append_max_sectors.value(),
+                    *module_parameters::poll_queues.value(),
                 )?;
                 disks.push(disk, GFP_KERNEL)?;
             }
@@ -309,6 +315,7 @@ impl NullBlkDevice {
         zone_max_open: u32,
         zone_max_active: u32,
         zone_append_max_sectors: u32,
+        poll_queues: u32,
     ) -> Result<Arc<GenDisk<Self>>> {
         let mut flags = mq::Flags::default();
 
@@ -329,7 +336,21 @@ impl NullBlkDevice {
 
         let tagset_ctor = || -> Result<Arc<_>> {
             Ok(Arc::pin_init(
-                TagSet::new(submit_queues, (), hw_queue_depth, 1, home_node, flags),
+                TagSet::new(
+                    submit_queues + poll_queues,
+                    KBox::new(
+                        NullBlkTagsetData {
+                            queue_depth: hw_queue_depth,
+                            submit_queue_count: submit_queues,
+                            poll_queue_count: poll_queues,
+                        },
+                        GFP_KERNEL,
+                    )?,
+                    hw_queue_depth,
+                    if poll_queues == 0 { 1 } else { 3 },
+                    home_node,
+                    flags,
+                ),
                 GFP_KERNEL,
             )?)
         };
@@ -611,6 +632,7 @@ impl HrTimerCallback for NullBlkDevice {
 struct HwQueueContext {
     page: Option<KBox<disk_storage::NullBlockPage>>,
     preload: xarray::XArrayPreloadBuffer,
+    poll_queue: kernel::ringbuffer::RingBuffer<Owned<mq::Request<NullBlkDevice>>>,
 }
 
 #[pin_data]
@@ -639,11 +661,17 @@ kernel::impl_has_hr_timer! {
     }
 }
 
+struct NullBlkTagsetData {
+    queue_depth: u32,
+    submit_queue_count: u32,
+    poll_queue_count: u32,
+}
+
 #[vtable]
 impl Operations for NullBlkDevice {
     type QueueData = Arc<Self>;
     type RequestData = Pdu;
-    type TagSetData = ();
+    type TagSetData = KBox<NullBlkTagsetData>;
     type HwData = Pin<KBox<SpinLock<HwQueueContext>>>;
 
     fn new_request_data() -> impl PinInit<Self::RequestData> {
@@ -659,6 +687,7 @@ impl Operations for NullBlkDevice {
         this: ArcBorrow<'_, Self>,
         rq: Owned<mq::IdleRequest<Self>>,
         _is_last: bool,
+        is_poll: bool,
     ) -> BlkResult {
         if this.bandwidth_limit != 0 {
             if !this.bandwidth_timer.active() {
@@ -684,9 +713,9 @@ impl Operations for NullBlkDevice {
         }
 
         // TODO: handle flush
-        // TODO: handle poll
         // TODO: fake timeout?
         // TODO: handle requeue
+        // TODO: live update queue count
 
         let mut rq = rq.start();
 
@@ -699,13 +728,29 @@ impl Operations for NullBlkDevice {
         #[cfg(not(CONFIG_BLK_DEV_ZONED))]
         this.handle_regular_command(&hw_data, &mut rq)?;
 
-        match this.irq_mode {
-            IRQMode::None => Self::end_request(rq),
-            IRQMode::Soft => mq::Request::complete(rq.into()),
-            IRQMode::Timer => {
-                OwnableRefCounted::into_shared(rq)
-                    .start(this.completion_time)
-                    .dismiss();
+        if is_poll {
+            // NOTE: We lack the ability to insert `Owned<Request>` into a
+            // `kernel::list::List`, so we use a `RingBuffer` instead. The
+            // drawback of this is that we have to allocate the space for the
+            // ring buffer during drive initialization, and we have to hold the
+            // lock protecting the list until we have processed all the requests
+            // in the list. Change to a linked list when the kernel gets this
+            // ability.
+
+            // NOTE: We are processing requests during submit rather than during
+            // poll. This is different from C driver. C driver does processing
+            // during poll.
+
+            hw_data.lock().poll_queue.push_head(rq)?;
+        } else {
+            match this.irq_mode {
+                IRQMode::None => Self::end_request(rq),
+                IRQMode::Soft => mq::Request::complete(rq.into()),
+                IRQMode::Timer => {
+                    OwnableRefCounted::into_shared(rq)
+                        .start(this.completion_time)
+                        .dismiss();
+                }
             }
         }
         Ok(())
@@ -714,14 +759,38 @@ impl Operations for NullBlkDevice {
     fn commit_rqs(_hw_data: Pin<&SpinLock<HwQueueContext>>, _queue_data: ArcBorrow<'_, Self>) {}
 
     // TODO: queue_rqs
-    // TODO: map_queues
-    // TODO: poll
 
-    fn init_hctx(_tagset_data: (), _hctx_idx: u32) -> Result<Self::HwData> {
+    fn poll(
+        hw_data: Pin<&SpinLock<HwQueueContext>>,
+        _this: ArcBorrow<'_, Self>,
+        batch: &mut IoCompletionBatch<Self>,
+    ) -> Result<bool> {
+        let mut guard = hw_data.lock();
+        let mut completed = false;
+
+        while let Some(rq) = guard.poll_queue.pop_tail() {
+            let status = rq.data_ref().error.load(ordering::Relaxed);
+            rq.data_ref().error.store(0, ordering::Relaxed);
+
+            // TODO: check error handling via status
+            if let Err(rq) = batch.add_request(rq, status != 0) {
+                Self::end_request(rq);
+            }
+
+            completed = true;
+        }
+
+        Ok(completed)
+    }
+
+    fn init_hctx(tagset_data: &NullBlkTagsetData, _hctx_idx: u32) -> Result<Self::HwData> {
         KBox::pin_init(
             new_spinlock!(HwQueueContext {
                 page: None,
-                preload: xarray::XArrayPreloadBuffer::new(2)?
+                preload: xarray::XArrayPreloadBuffer::new(2)?,
+                poll_queue: kernel::ringbuffer::RingBuffer::new(
+                    tagset_data.queue_depth.try_into()?
+                )?,
             }),
             GFP_KERNEL,
         )
@@ -743,5 +812,35 @@ impl Operations for NullBlkDevice {
         callback: impl Fn(*mut bindings::blk_zone, u32) -> Result,
     ) -> Result<u32> {
         Self::report_zones_internal(disk, sector, nr_zones, callback)
+    }
+
+    fn map_queues(tag_set: Pin<&mut TagSet<Self>>) {
+        let mut submit_queue_count = tag_set.data().submit_queue_count;
+        let mut poll_queue_count = tag_set.data().poll_queue_count;
+
+        if tag_set.hw_queue_count() != submit_queue_count + poll_queue_count {
+            pr_warn!(
+                "tag set has unexpected hardware queue count: {}\n",
+                tag_set.hw_queue_count()
+            );
+            submit_queue_count = 1;
+            poll_queue_count = 0;
+        }
+
+        let mut offset = 0;
+        tag_set
+            .update_maps(|mut qmap| {
+                use mq::QueueType::*;
+                let queue_count = match qmap.kind() {
+                    Default => submit_queue_count,
+                    Read => 0,
+                    Poll => poll_queue_count,
+                };
+                qmap.set_queue_count(queue_count);
+                qmap.set_offset(offset);
+                offset += queue_count;
+                qmap.map_queues();
+            })
+            .unwrap()
     }
 }

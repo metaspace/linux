@@ -22,7 +22,7 @@ use core::{ffi::c_void, marker::PhantomData, ops::Deref, pin::Pin, ptr::NonNull,
 use crate::block::bio::Bio;
 use crate::block::bio::BioIterator;
 
-use super::RequestQueue;
+use super::{IoCompletionBatch, RequestQueue};
 
 mod command;
 pub use command::Command;
@@ -105,6 +105,10 @@ impl<T: Operations> RequestInner<T> {
 
     pub fn queue(&self) -> &RequestQueue<T> {
         unsafe { RequestQueue::from_raw((*self.0.get()).q) }
+    }
+
+    pub fn as_raw(&self) -> *mut bindings::request {
+        self.0.get()
     }
 }
 
@@ -385,7 +389,7 @@ impl<T: Operations> Owned<Request<T>> {
 
     /// Notify the block layer that the request has been completed.
     pub fn end(self, status: u8) {
-        let request_ptr = self.0 .0.get().cast();
+        let request_ptr = self.0.0.get().cast();
         core::mem::forget(self);
         // SAFETY: By type invariant, `this.0` was a valid `struct request`. The
         // existence of `self` guarantees that there are no `ARef`s pointing to
