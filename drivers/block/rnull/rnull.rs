@@ -20,13 +20,14 @@ use kernel::{
         SECTOR_MASK, SECTOR_SHIFT,
     },
     error::{code, Result},
-    ffi, new_mutex, new_spinlock,
+    ffi, new_mutex, new_spinlock, new_xarray,
     page::{Page, PAGE_SIZE},
     prelude::*,
     str::CString,
     sync::{
+        aref::ARef,
         atomic::{ordering, Atomic},
-        aref::ARef, Arc, Mutex, SpinLock,
+        Arc, Mutex, SpinLock,
     },
     time::{
         hrtimer::{HrTimerCallback, HrTimerCallbackContext, HrTimerPointer, HrTimerRestart},
