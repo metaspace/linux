@@ -597,6 +597,18 @@ impl NullBlkDevice {
             _ => rq.end(bindings::BLK_STS_IOERR),
         }
     }
+
+    fn complete_request(&self, rq: Owned<mq::Request<Self>>) {
+        match self.irq_mode {
+            IRQMode::None => Self::end_request(rq),
+            IRQMode::Soft => mq::Request::complete(rq.into()),
+            IRQMode::Timer => {
+                OwnableRefCounted::into_shared(rq)
+                    .start(self.completion_time)
+                    .dismiss();
+            }
+        }
+    }
 }
 
 impl_has_hr_timer! {
@@ -719,6 +731,15 @@ impl Operations for NullBlkDevice {
 
         let mut rq = rq.start();
 
+        if rq.command() == mq::Command::Flush {
+            if this.memory_backed {
+                this.storage.flush(&hw_data)?;
+            }
+            this.complete_request(rq);
+
+            return Ok(());
+        }
+
         #[cfg(CONFIG_BLK_DEV_ZONED)]
         if this.zoned.enabled {
             this.handle_zoned_command(&hw_data, &mut rq)?;
@@ -743,15 +764,7 @@ impl Operations for NullBlkDevice {
 
             hw_data.lock().poll_queue.push_head(rq)?;
         } else {
-            match this.irq_mode {
-                IRQMode::None => Self::end_request(rq),
-                IRQMode::Soft => mq::Request::complete(rq.into()),
-                IRQMode::Timer => {
-                    OwnableRefCounted::into_shared(rq)
-                        .start(this.completion_time)
-                        .dismiss();
-                }
-            }
+            this.complete_request(rq);
         }
         Ok(())
     }

@@ -81,6 +81,13 @@ impl DiskStorage {
             remaining_bytes -= processed;
         }
     }
+
+    pub(crate) fn flush(&self, hw_data: &Pin<&SpinLock<HwQueueContext>>) -> Result {
+        let mut tree_guard = self.lock();
+        let mut hw_data_guard = hw_data.lock();
+        let mut access = self.access(&mut tree_guard, &mut hw_data_guard);
+        access.flush()
+    }
 }
 
 pub(crate) struct DiskStorageAccess<'a, 'b> {
@@ -111,13 +118,16 @@ impl<'a, 'b> DiskStorageAccess<'a, 'b> {
         (index << block::PAGE_SECTORS_SHIFT) as u64
     }
 
-    fn extract_cache_page(&mut self) -> Result<KBox<NullBlockPage>> {
-        let cache_entry = self
-            .cache_guard
-            .find_next_entry_circular(
-                self.disk_storage.next_flush_sector.load(ordering::Relaxed) as usize
-            )
-            .expect("Expected to find a page in the cache");
+    fn extract_cache_page(&mut self) -> Result<Option<KBox<NullBlockPage>>> {
+        let cache_entry = self.cache_guard.find_next_entry_circular(
+            self.disk_storage.next_flush_sector.load(ordering::Relaxed) as usize,
+        );
+
+        let cache_entry = if let Some(entry) = cache_entry {
+            entry
+        } else {
+            return Ok(None);
+        };
 
         let index = cache_entry.index();
 
@@ -156,7 +166,16 @@ impl<'a, 'b> DiskStorageAccess<'a, 'b> {
             }
         };
 
-        Ok(page)
+        Ok(Some(page))
+    }
+
+    fn flush(&mut self) -> Result {
+        if self.disk_storage.cache_size > 0 {
+            while let Some(page) = self.extract_cache_page()? {
+                drop(page);
+            }
+        }
+        Ok(())
     }
 
     fn get_cache_page(&mut self, sector: u64) -> Result<&mut NullBlockPage> {
@@ -174,6 +193,7 @@ impl<'a, 'b> DiskStorageAccess<'a, 'b> {
                     .expect("Expected to have a page available")
             } else {
                 self.extract_cache_page()?
+                    .expect("Expected to find a page in the cache")
             };
             Ok(self
                 .cache_guard
