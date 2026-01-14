@@ -724,9 +724,7 @@ impl Operations for NullBlkDevice {
             }
         }
 
-        // TODO: handle flush
-        // TODO: fake timeout?
-        // TODO: handle requeue
+        // TODO: fault injection
         // TODO: live update queue count
 
         let mut rq = rq.start();
