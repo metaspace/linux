@@ -257,7 +257,7 @@ struct TreeContainer {
 impl TreeContainer {
     fn new() -> impl PinInit<Self> {
         pin_init!(TreeContainer {
-            tree <- CacheAligned::new_initializer(XArray::new(kernel::xarray::AllocKind::Alloc)),
+            tree <- CacheAligned::new_initializer(new_xarray!(kernel::xarray::AllocKind::Alloc)),
             lock <- CacheAligned::new_initializer(new_spinlock!((), "rnullb:mem")),
         })
     }
