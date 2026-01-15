@@ -102,6 +102,25 @@ macro_rules! impl_flags {
             }
         }
 
+        impl ::core::convert::From<$flag> for $ty {
+            #[inline]
+            fn from(value: $flag) -> Self {
+                value as _
+            }
+        }
+
+        impl ::core::convert::TryFrom<$ty> for $flags {
+            type Error = ::kernel::error::Error;
+
+            fn try_from(value: $ty) -> Result<Self, Self::Error> {
+                match value & !$flags::all_bits() == 0 {
+                    // SAFETY: We checked above that `value` is a valid bit pattern for `$flags`.
+                    true => Ok(unsafe {::core::mem::transmute(value)}),
+                    false => Err(::kernel::error::code::EINVAL),
+                }
+            }
+        }
+
         impl ::core::ops::BitOr for $flags {
             type Output = Self;
             #[inline]
@@ -222,6 +241,22 @@ macro_rules! impl_flags {
             #[inline]
             fn bitxor(self, rhs: $flag) -> Self::Output {
                 self ^ Self::from(rhs)
+            }
+        }
+
+        impl ::core::ops::BitOr<$flag> for $ty {
+            type Output = Self;
+
+            #[inline]
+            fn bitor(self, rhs: $flag) -> Self::Output {
+                self | <$flag as Into<Self>>::into(rhs)
+            }
+        }
+
+        impl ::core::ops::BitOrAssign<$flag> for $ty {
+            #[inline]
+            fn bitor_assign(&mut self, rhs: $flag) {
+                *self = *self | <$flag as Into<Self>>::into(rhs)
             }
         }
 

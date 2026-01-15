@@ -17,7 +17,9 @@ use crate::{
     },
     types::{ForeignOwnable, Opaque, Ownable, OwnableRefCounted, Owned},
 };
-use core::{ffi::c_void, marker::PhantomData, ops::Deref, pin::Pin, ptr::NonNull, sync::atomic::Ordering};
+use core::{
+    ffi::c_void, marker::PhantomData, ops::Deref, pin::Pin, ptr::NonNull, sync::atomic::Ordering,
+};
 
 use crate::block::bio::Bio;
 use crate::block::bio::BioIterator;
@@ -26,6 +28,12 @@ use super::{IoCompletionBatch, RequestQueue};
 
 mod command;
 pub use command::Command;
+
+mod flag;
+pub use flag::{Flag, Flags};
+
+mod feature;
+pub use feature::{Feature, Features};
 
 #[repr(transparent)]
 pub struct IdleRequest<T>(RequestInner<T>);
@@ -77,6 +85,12 @@ impl<T: Operations> RequestInner<T> {
 
     pub fn command(&self) -> Command {
         unsafe { Command::from_raw(self.command_raw()) }
+    }
+
+    pub fn flags(&self) -> Flags {
+        // SAFETY: By C API contract and type invariant, `cmd_flags` is valid for read
+        let flags = unsafe { (*self.0.get()).cmd_flags & !((1 << bindings::REQ_OP_BITS) - 1) };
+        Flags::try_from(flags).expect("Request should have valid falgs")
     }
 
     /// Get the target sector for the request.
@@ -267,9 +281,8 @@ impl<T: Operations> Request<T> {
     #[inline(always)]
     pub fn set_sector(self: Pin<&mut Self>, sector: u64) {
         // SAFETY: By type invariant of `Self`, `self.0` is valid and live.
-        unsafe { (*self.0.0.get()).__sector = sector}
+        unsafe { (*self.0 .0.get()).__sector = sector }
     }
-
 }
 
 /// A wrapper around data stored in the private area of the C [`struct request`].
@@ -389,7 +402,7 @@ impl<T: Operations> Owned<Request<T>> {
 
     /// Notify the block layer that the request has been completed.
     pub fn end(self, status: u8) {
-        let request_ptr = self.0.0.get().cast();
+        let request_ptr = self.0 .0.get().cast();
         core::mem::forget(self);
         // SAFETY: By type invariant, `this.0` was a valid `struct request`. The
         // existence of `self` guarantees that there are no `ARef`s pointing to

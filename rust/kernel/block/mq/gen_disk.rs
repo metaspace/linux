@@ -19,6 +19,8 @@ use crate::{
 };
 use core::{marker::PhantomData, ptr::NonNull};
 
+use super::request;
+
 /// A builder for [`GenDisk`].
 ///
 /// Use this struct to configure and add new [`GenDisk`] to the VFS.
@@ -31,6 +33,8 @@ pub struct GenDiskBuilder<T> {
     zoned: bool,
     zone_size_sectors: u32,
     zone_append_max_sectors: u32,
+    write_cache: bool,
+    forced_unit_access: bool,
     _p: PhantomData<T>,
 }
 
@@ -45,6 +49,8 @@ impl<T> Default for GenDiskBuilder<T> {
             zoned: false,
             zone_size_sectors: 0,
             zone_append_max_sectors: 0,
+            write_cache: false,
+            forced_unit_access: false,
             _p: PhantomData,
         }
     }
@@ -131,6 +137,16 @@ impl<T: Operations> GenDiskBuilder<T> {
         self
     }
 
+    pub fn forced_unit_access(mut self, enable: bool) -> Self {
+        self.forced_unit_access = enable;
+        self
+    }
+
+    pub fn write_cache(mut self, enable: bool) -> Self {
+        self.write_cache = enable;
+        self
+    }
+
     /// Build a new `GenDisk` and add it to the VFS.
     pub fn build(
         self,
@@ -151,7 +167,7 @@ impl<T: Operations> GenDiskBuilder<T> {
         lim.physical_block_size = self.physical_block_size;
         lim.max_hw_discard_sectors = self.max_hw_discard_sectors;
         if self.rotational {
-            lim.features |= bindings::BLK_FEAT_ROTATIONAL;
+            lim.features = request::Feature::Rotational.into();
         }
 
         if self.zoned {
@@ -159,9 +175,17 @@ impl<T: Operations> GenDiskBuilder<T> {
                 return Err(error::code::EINVAL);
             }
 
-            lim.features |= bindings::BLK_FEAT_ZONED;
+            //lim.features |= request::Feature::Zoned.into();
             lim.chunk_sectors = self.zone_size_sectors;
             lim.max_hw_zone_append_sectors = self.zone_append_max_sectors;
+        }
+
+        if self.write_cache {
+            lim.features |= request::Feature::WriteCache;
+        }
+
+        if self.forced_unit_access {
+            lim.features |= request::Feature::ForcedUnitAccess;
         }
 
         // SAFETY: `tagset.raw_tag_set()` points to a valid and initialized tag set

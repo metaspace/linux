@@ -6,6 +6,7 @@ use kernel::{
     uapi::PAGE_SECTORS,
 };
 
+// TODO: Use rust bitmap
 const _CHEKC_STATUS_WIDTH: () = build_assert!((PAGE_SIZE >> SECTOR_SHIFT) <= 64);
 
 pub(crate) struct NullBlockPage {

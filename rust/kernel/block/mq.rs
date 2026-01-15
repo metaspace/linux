@@ -108,7 +108,7 @@
 //! }
 //!
 //! let tagset: Arc<TagSet<MyBlkDevice>> =
-//!     Arc::pin_init(TagSet::new(1, (), 256, 1, bindings::NUMA_NO_NODE, mq::Flags::default()), GFP_KERNEL)?;
+//!     Arc::pin_init(TagSet::new(1, (), 256, 1, bindings::NUMA_NO_NODE, mq::TagSetFlags::default()), GFP_KERNEL)?;
 //! let mut disk = gen_disk::GenDiskBuilder::new()
 //!     .capacity_sectors(4096)
 //!     .build(fmt!("myblk"), tagset, ())?;
@@ -124,11 +124,12 @@ mod tag_set;
 
 pub use operations::IoCompletionBatch;
 pub use operations::Operations;
-pub use request::IdleRequest;
 pub use request::Command;
+pub use request::Flag as RequestFlag;
+pub use request::IdleRequest;
 pub use request::Request;
 pub use request::RequestTimerHandle;
 pub use request_queue::RequestQueue;
-pub use tag_set::Flags;
-pub use tag_set::TagSet;
+pub use tag_set::Flags as TagSetFlags;
 pub use tag_set::QueueType;
+pub use tag_set::TagSet;
