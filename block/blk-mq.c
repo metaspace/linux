@@ -5086,7 +5086,7 @@ static int blk_mq_elv_switch_none(struct request_queue *q,
 }
 
 static void __blk_mq_update_nr_hw_queues(struct blk_mq_tag_set *set,
-							int nr_hw_queues)
+					 unsigned int nr_hw_queues)
 {
 	struct request_queue *q;
 	int prev_nr_hw_queues = set->nr_hw_queues;
@@ -5178,7 +5178,8 @@ out_free_ctx:
 		__blk_mq_free_map_and_rqs(set, i);
 }
 
-void blk_mq_update_nr_hw_queues(struct blk_mq_tag_set *set, int nr_hw_queues)
+void blk_mq_update_nr_hw_queues(struct blk_mq_tag_set *set,
+				unsigned int nr_hw_queues)
 {
 	down_write(&set->update_nr_hwq_lock);
 	mutex_lock(&set->tag_list_lock);

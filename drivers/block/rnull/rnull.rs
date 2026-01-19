@@ -10,7 +10,7 @@ mod util;
 #[cfg(CONFIG_BLK_DEV_ZONED)]
 mod zoned;
 
-use configfs::IRQMode;
+use configfs::{IRQMode, QueueConfig};
 use core::option::Option::Some;
 use disk_storage::{
     DiskStorage,
@@ -221,6 +221,8 @@ impl kernel::InPlaceModule for NullBlkModule {
                     *module_parameters::submit_queues.value()
                 };
 
+                let poll_queues = *module_parameters::poll_queues.value();
+
                 let block_size_bytes = *module_parameters::bs.value();
                 let disk = NullBlkDevice::new(
                     &name,
@@ -230,7 +232,7 @@ impl kernel::InPlaceModule for NullBlkModule {
                     (*module_parameters::irqmode.value()).try_into()?,
                     Delta::from_nanos(completion_time),
                     *module_parameters::memory_backed.value() != 0,
-                    submit_queues,
+                    Arc::pin_init(new_mutex!(QueueConfig{submit_queues, poll_queues}), GFP_KERNEL)?,
                     *module_parameters::home_node.value(),
                     *module_parameters::discard.value() != 0,
                     *module_parameters::no_sched.value() != 0,
@@ -249,7 +251,6 @@ impl kernel::InPlaceModule for NullBlkModule {
                     *module_parameters::zone_max_open.value(),
                     *module_parameters::zone_max_active.value(),
                     *module_parameters::zone_append_max_sectors.value(),
-                    *module_parameters::poll_queues.value(),
                     *module_parameters::fua.value() != 0,
                 )?;
                 disks.push(disk, GFP_KERNEL)?;
@@ -301,7 +302,7 @@ impl NullBlkDevice {
         irq_mode: IRQMode,
         completion_time: Delta,
         memory_backed: bool,
-        submit_queues: u32,
+        queue_config: Arc<Mutex<QueueConfig>>,
         home_node: i32,
         discard: bool,
         no_sched: bool,
@@ -320,7 +321,6 @@ impl NullBlkDevice {
         zone_max_open: u32,
         zone_max_active: u32,
         zone_append_max_sectors: u32,
-        poll_queues: u32,
         forced_unit_access: bool,
     ) -> Result<Arc<GenDisk<Self>>> {
         let mut flags = mq::TagSetFlags::default();
@@ -337,6 +337,11 @@ impl NullBlkDevice {
             return Err(code::EINVAL);
         }
 
+        let queue_config_guard = queue_config.lock();
+        let submit_queues = queue_config_guard.submit_queues;
+        let poll_queues = queue_config_guard.poll_queues;
+        drop(queue_config_guard);
+
         let tagset_ctor = || -> Result<Arc<_>> {
             Ok(Arc::pin_init(
                 TagSet::new(
@@ -344,8 +349,7 @@ impl NullBlkDevice {
                     KBox::new(
                         NullBlkTagsetData {
                             queue_depth: hw_queue_depth,
-                            submit_queue_count: submit_queues,
-                            poll_queue_count: poll_queues,
+                            queue_config,
                         },
                         GFP_KERNEL,
                     )?,
@@ -694,8 +698,7 @@ kernel::impl_has_hr_timer! {
 
 struct NullBlkTagsetData {
     queue_depth: u32,
-    submit_queue_count: u32,
-    poll_queue_count: u32,
+    queue_config: Arc<Mutex<QueueConfig>>,
 }
 
 #[vtable]
@@ -786,7 +789,6 @@ impl Operations for NullBlkDevice {
     fn commit_rqs(_hw_data: Pin<&SpinLock<HwQueueContext>>, _queue_data: ArcBorrow<'_, Self>) {}
 
     // TODO: fault injection
-    // TODO: live update queue count
     // TODO: queue_qs
 
     fn poll(
@@ -844,8 +846,10 @@ impl Operations for NullBlkDevice {
     }
 
     fn map_queues(tag_set: Pin<&mut TagSet<Self>>) {
-        let mut submit_queue_count = tag_set.data().submit_queue_count;
-        let mut poll_queue_count = tag_set.data().poll_queue_count;
+        let queue_config = tag_set.data().queue_config.lock();
+        let mut submit_queue_count = queue_config.submit_queues;
+        let mut poll_queue_count = queue_config.poll_queues;
+        drop(queue_config);
 
         if tag_set.hw_queue_count() != submit_queue_count + poll_queue_count {
             pr_warn!(

@@ -223,7 +223,7 @@ impl<T: Operations> GenDiskBuilder<T> {
         // `__blk_mq_alloc_disk` above.
         let mut disk = UniqueArc::new(
             GenDisk {
-                _tagset: tagset,
+                tag_set: tagset,
                 gendisk,
                 backref: Arc::pin_init(
                     Revocable::new(GenDiskRef(NonNull::dangling())),
@@ -303,7 +303,7 @@ impl<T: Operations> GenDiskBuilder<T> {
 ///    `bindings::device_add_disk`.
 ///  - `self.gendisk.queue.queuedata` is initialized by a call to `ForeignOwnable::into_foreign`.
 pub struct GenDisk<T: Operations> {
-    _tagset: Arc<TagSet<T>>,
+    tag_set: Arc<TagSet<T>>,
     gendisk: *mut bindings::gendisk,
     backref: Arc<Revocable<GenDiskRef<T>>>,
 }
@@ -319,6 +319,11 @@ impl<T: Operations> GenDisk<T> {
 
     pub fn queue(&self) -> &RequestQueue<T> {
         unsafe { RequestQueue::from_raw((*self.gendisk).queue) }
+    }
+
+    /// Get a reference to the `TagSet` used by this `GenDisk`.
+    pub fn tag_set(&self) -> &Arc<TagSet<T>> {
+        &self.tag_set
     }
 }
 
