@@ -82,11 +82,11 @@ impl DiskStorage {
         }
     }
 
-    pub(crate) fn flush(&self, hw_data: &Pin<&SpinLock<HwQueueContext>>) -> Result {
+    pub(crate) fn flush(&self, hw_data: &Pin<&SpinLock<HwQueueContext>>) {
         let mut tree_guard = self.lock();
         let mut hw_data_guard = hw_data.lock();
         let mut access = self.access(&mut tree_guard, &mut hw_data_guard);
-        access.flush()
+        access.flush();
     }
 
     pub(crate) fn cache_enabled(&self) -> bool {
@@ -122,7 +122,7 @@ impl<'a, 'b> DiskStorageAccess<'a, 'b> {
         (index << block::PAGE_SECTORS_SHIFT) as u64
     }
 
-    fn extract_cache_page(&mut self) -> Result<Option<KBox<NullBlockPage>>> {
+    fn extract_cache_page(&mut self) -> Option<KBox<NullBlockPage>> {
         let cache_entry = self.cache_guard.find_next_entry_circular(
             self.disk_storage.next_flush_sector.load(ordering::Relaxed) as usize,
         );
@@ -130,7 +130,7 @@ impl<'a, 'b> DiskStorageAccess<'a, 'b> {
         let cache_entry = if let Some(entry) = cache_entry {
             entry
         } else {
-            return Ok(None);
+            return None;
         };
 
         let index = cache_entry.index();
@@ -146,8 +146,8 @@ impl<'a, 'b> DiskStorageAccess<'a, 'b> {
 
         let page = match self.disk_guard.get_entry(index) {
             xarray::Entry::Vacant(disk_entry) => {
-                disk_entry.insert(cache_entry.remove(), Some(&mut self.hw_data_guard.preload))?;
-                self.hw_data_guard.page.take().ok_or(ENOSPC)?
+                disk_entry.insert(cache_entry.remove(), Some(&mut self.hw_data_guard.preload)).expect("Preload is set up to allow insert without failure");
+                self.hw_data_guard.page.take().expect("Preload has allocated for us")
             }
             xarray::Entry::Occupied(mut disk_entry) => {
                 let mut page = if cache_entry.is_full() {
@@ -160,7 +160,7 @@ impl<'a, 'b> DiskStorageAccess<'a, 'b> {
                             disk_entry.page_mut().get_pin_mut(),
                             offset,
                             block::SECTOR_SIZE as usize,
-                        )?;
+                        ).expect("Write to succeed");
                         offset += block::SECTOR_SIZE as usize;
                     }
                     src.remove()
@@ -170,16 +170,15 @@ impl<'a, 'b> DiskStorageAccess<'a, 'b> {
             }
         };
 
-        Ok(Some(page))
+        Some(page)
     }
 
-    fn flush(&mut self) -> Result {
+    fn flush(&mut self) {
         if self.disk_storage.cache_size > 0 {
-            while let Some(page) = self.extract_cache_page()? {
+            while let Some(page) = self.extract_cache_page() {
                 drop(page);
             }
         }
-        Ok(())
     }
 
     fn get_or_alloc_cache_page(&mut self, sector: u64) -> Result<&mut NullBlockPage> {
@@ -196,7 +195,7 @@ impl<'a, 'b> DiskStorageAccess<'a, 'b> {
                     .take()
                     .expect("Expected to have a page available")
             } else {
-                self.extract_cache_page()?
+                self.extract_cache_page()
                     .expect("Expected to find a page in the cache")
             };
             Ok(self

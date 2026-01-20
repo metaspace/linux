@@ -18,6 +18,8 @@ use crate::{
 use core::{marker::PhantomData, ptr::NonNull};
 use pin_init::PinInit;
 
+use super::request_list::RequestList;
+
 type ForeignBorrowed<'a, T> = <T as ForeignOwnable>::Borrowed<'a>;
 
 /// Implement this trait to interface blk-mq as block devices.
@@ -65,8 +67,14 @@ pub trait Operations: Sized {
         queue_data: ForeignBorrowed<'_, Self::QueueData>,
         rq: Owned<IdleRequest<Self>>,
         is_last: bool,
-        is_poll: bool,
     ) -> BlkResult;
+
+    fn queue_rqs(
+        hw_data: ForeignBorrowed<'_, Self::HwData>,
+        queue_data: ForeignBorrowed<'_, Self::QueueData>,
+        requests: &mut RequestList<Self>) {
+        build_error!(crate::error::VTABLE_DEFAULT_ERROR)
+    }
 
     /// Called by the kernel to indicate that queued requests should be submitted.
     fn commit_rqs(
@@ -176,8 +184,6 @@ impl<T: Operations> OperationsVTable<T> {
         // `into_foreign` in `Self::init_hctx_callback`.
         let hw_data = unsafe { T::HwData::borrow((*hctx).driver_data) };
 
-        let is_poll = unsafe { (*hctx).type_} as u32 == bindings::hctx_type_HCTX_TYPE_POLL;
-
         // SAFETY: `hctx` is valid as required by this function.
         let queue_data = unsafe { (*(*hctx).queue).queuedata };
 
@@ -194,7 +200,6 @@ impl<T: Operations> OperationsVTable<T> {
             // SAFETY: `bd` is valid as required by the safety requirement for
             // this function.
             unsafe { (*bd).last },
-            is_poll,
         );
 
         if let Err(e) = ret {
@@ -202,6 +207,49 @@ impl<T: Operations> OperationsVTable<T> {
         } else {
             bindings::BLK_STS_OK as bindings::blk_status_t
         }
+    }
+
+    /// This function is called by the C kernel to queue a list of new requests.
+    ///
+    /// Driver is guaranteed that each request belongs to the same queue. If the
+    /// driver doesn't empty the `rqlist` completely, then the rest will be
+    /// queued individually by the block layer upon return.
+    ///
+    /// # SAFETY
+    ///
+    /// - `requests` must satisfy the safety requirements of `RequestList<T>`
+    /// - All requests in `requests` must belong to the same hardware context.
+    unsafe extern "C" fn queue_rqs_callback(requests: *mut bindings::rq_list) {
+        // SAFETY:
+        // - By the safety requirements of this function, `requests` is valid for use as a `RequestList`.
+        // - We have exclusive access to `requests` for the duration of this function.
+        let requests = unsafe { RequestList::from_raw(requests) };
+
+        let rq_ptr = requests.peek_raw();
+
+        if rq_ptr.is_null() {
+            return;
+        }
+
+        // SAFETY: By function safety requirements, rq_ptr is pointing to a
+        // valid request.
+        let hctx = unsafe { (*rq_ptr).mq_hctx };
+
+        // SAFETY: The safety requirement for this function ensure that `hctx`
+        // is valid and that `driver_data` was produced by a call to
+        // `into_foreign` in `Self::init_hctx_callback`.
+        let hw_data = unsafe { T::HwData::borrow((*hctx).driver_data) };
+
+        // SAFETY: `hctx` is valid as required by this function.
+        let queue_data = unsafe { (*(*hctx).queue).queuedata };
+
+        // SAFETY: `queue.queuedata` was created by `GenDiskBuilder::build` with
+        // a call to `ForeignOwnable::into_foreign` to create `queuedata`.
+        // `ForeignOwnable::from_foreign` is only called when the tagset is
+        // dropped, which happens after we are dropped.
+        let queue_data = unsafe { T::QueueData::borrow(queue_data) };
+
+        T::queue_rqs(hw_data, queue_data, requests);
     }
 
     /// This function is called by the C kernel. A pointer to this function is
@@ -396,10 +444,15 @@ impl<T: Operations> OperationsVTable<T> {
         args: *mut bindings::blk_report_zones_args,
     ) -> i32 {
         let disk_ptr = disk;
-        let disk = unsafe { GenDiskRef::from_ptr(unsafe { NonNull::new_unchecked((*disk).private_data.cast()) }) };
-        from_result(|| T::report_zones(&disk, sector, nr_zones, |zone, idx| -> Result {
-            to_result(unsafe { bindings::disk_report_zone(disk_ptr, zone, idx, args) })
-        }).and_then(|v: u32| -> Result<_> { Ok(v.try_into()?)}))
+        let disk = unsafe {
+            GenDiskRef::from_ptr(unsafe { NonNull::new_unchecked((*disk).private_data.cast()) })
+        };
+        from_result(|| {
+            T::report_zones(&disk, sector, nr_zones, |zone, idx| -> Result {
+                to_result(unsafe { bindings::disk_report_zone(disk_ptr, zone, idx, args) })
+            })
+            .and_then(|v: u32| -> Result<_> { Ok(v.try_into()?) })
+        })
     }
 
     /// This function is called by the C kernel. A pointer to this function is
@@ -419,7 +472,11 @@ impl<T: Operations> OperationsVTable<T> {
 
     const VTABLE: bindings::blk_mq_ops = bindings::blk_mq_ops {
         queue_rq: Some(Self::queue_rq_callback),
-        queue_rqs: None,
+        queue_rqs: if T::HAS_QUEUE_RQS {
+            Some(Self::queue_rqs_callback)
+        } else {
+            None
+        },
         commit_rqs: Some(Self::commit_rqs_callback),
         get_budget: None,
         put_budget: None,

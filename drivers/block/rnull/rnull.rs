@@ -11,7 +11,7 @@ mod util;
 mod zoned;
 
 use configfs::{IRQMode, QueueConfig};
-use core::option::Option::Some;
+use core::{error, option::Option::Some};
 use disk_storage::{
     DiskStorage,
     NullBlockPage,
@@ -26,7 +26,7 @@ use kernel::{
             BadBlocks, //
         },
         bio::Segment,
-        error::BlkResult,
+        error::{BlkError, BlkResult},
         mq::{
             self,
             gen_disk::{
@@ -34,8 +34,11 @@ use kernel::{
                 GenDisk,
                 GenDiskRef, //
             },
+            IdleRequest,
             IoCompletionBatch,
             Operations,
+            Request,
+            RequestList,
             TagSet, //
         },
         SECTOR_SHIFT,
@@ -232,7 +235,13 @@ impl kernel::InPlaceModule for NullBlkModule {
                     (*module_parameters::irqmode.value()).try_into()?,
                     Delta::from_nanos(completion_time),
                     *module_parameters::memory_backed.value() != 0,
-                    Arc::pin_init(new_mutex!(QueueConfig{submit_queues, poll_queues}), GFP_KERNEL)?,
+                    Arc::pin_init(
+                        new_mutex!(QueueConfig {
+                            submit_queues,
+                            poll_queues
+                        }),
+                        GFP_KERNEL,
+                    )?,
                     *module_parameters::home_node.value(),
                     *module_parameters::discard.value() != 0,
                     *module_parameters::no_sched.value() != 0,
@@ -466,7 +475,7 @@ impl NullBlkDevice {
         mut hw_data_guard: &'b mut SpinLockGuard<'c, HwQueueContext>,
         mut sector: u64,
         mut segment: Segment<'_>,
-        bypass_cache: bool
+        bypass_cache: bool,
     ) -> Result {
         while !segment.is_empty() {
             Self::preload(&mut tree_guard, &mut hw_data_guard, self.block_size_bytes)?;
@@ -483,11 +492,12 @@ impl NullBlkDevice {
             page.set_occupied(sector);
             let page_offset = (sector & block::SECTOR_MASK as u64) << block::SECTOR_SHIFT;
 
-
-            sector += segment.copy_to_page_limit(page.page_mut().get_pin_mut(), page_offset as usize, self.block_size_bytes.try_into()?)
-                as u64
+            sector += segment.copy_to_page_limit(
+                page.page_mut().get_pin_mut(),
+                page_offset as usize,
+                self.block_size_bytes.try_into()?,
+            ) as u64
                 >> block::SECTOR_SHIFT;
-
         }
         Ok(())
     }
@@ -543,9 +553,13 @@ impl NullBlkDevice {
                     .len()
                     .min((end_sector - sector) as u32 >> SECTOR_SHIFT);
                 match command {
-                    mq::Command::Write => {
-                        self.write(&mut tree_guard, &mut hw_data_guard, sector, segment, skip_cache)?
-                    }
+                    mq::Command::Write => self.write(
+                        &mut tree_guard,
+                        &mut hw_data_guard,
+                        sector,
+                        segment,
+                        skip_cache,
+                    )?,
                     mq::Command::Read => {
                         self.read(&mut tree_guard, &mut hw_data_guard, sector, segment)?
                     }
@@ -632,6 +646,104 @@ impl NullBlkDevice {
             }
         }
     }
+
+    #[inline(always)]
+    fn queue_rq_internal(
+        hw_data: Pin<&SpinLock<HwQueueContext>>,
+        this: ArcBorrow<'_, Self>,
+        rq: Owned<mq::IdleRequest<Self>>,
+        _is_last: bool,
+    ) -> Result<(), QueueRequestError> {
+        if this.bandwidth_limit != 0 {
+            if !this.bandwidth_timer.active() {
+                drop(this.bandwidth_timer_handle.lock().take());
+                let arc: Arc<_> = this.into();
+                *this.bandwidth_timer_handle.lock() =
+                    Some(arc.start(Self::BANDWIDTH_TIMER_INTERVAL));
+            }
+
+            if this
+                .bandwidth_bytes
+                .fetch_add(rq.bytes() as u64, ordering::Relaxed)
+                + (rq.bytes() as u64)
+                > this.bandwidth_limit
+            {
+                rq.queue().stop_hw_queues();
+                if this.bandwidth_bytes.load(ordering::Relaxed) <= this.bandwidth_limit {
+                    rq.queue().start_stopped_hw_queues_async();
+                }
+
+                return Err(QueueRequestError {
+                    request: rq,
+                    error: kernel::block::error::code::BLK_STS_DEV_RESOURCE,
+                });
+            }
+        }
+
+        let mut rq = rq.start();
+
+        if rq.command() == mq::Command::Flush {
+            if this.memory_backed {
+                this.storage.flush(&hw_data);
+            }
+            this.complete_request(rq);
+
+            return Ok(());
+        }
+
+        let status = (|| -> Result {
+            #[cfg(CONFIG_BLK_DEV_ZONED)]
+            if this.zoned.enabled {
+                this.handle_zoned_command(&hw_data, &mut rq)?;
+            } else {
+                this.handle_regular_command(&hw_data, &mut rq)?;
+            }
+            #[cfg(not(CONFIG_BLK_DEV_ZONED))]
+            this.handle_regular_command(&hw_data, &mut rq)?;
+
+            Ok(())
+        })();
+
+        if let Err(e) = status {
+            // Do not overwrite existing error.
+            rq.data_ref().error.cmpxchg(0, e.to_errno(), ordering::Relaxed);
+        }
+
+        if rq.is_poll() {
+            // NOTE: We lack the ability to insert `Owned<Request>` into a
+            // `kernel::list::List`, so we use a `RingBuffer` instead. The
+            // drawback of this is that we have to allocate the space for the
+            // ring buffer during drive initialization, and we have to hold the
+            // lock protecting the list until we have processed all the requests
+            // in the list. Change to a linked list when the kernel gets this
+            // ability.
+
+            // NOTE: We are processing requests during submit rather than during
+            // poll. This is different from C driver. C driver does processing
+            // during poll.
+
+            hw_data
+                .lock()
+                .poll_queue
+                .push_head(rq)
+                .expect("Buffer is sized to hold all in flight requests");
+        } else {
+            this.complete_request(rq);
+        }
+
+        Ok(())
+    }
+}
+
+struct QueueRequestError {
+    request: Owned<IdleRequest<NullBlkDevice>>,
+    error: BlkError,
+}
+
+impl From<QueueRequestError> for BlkError {
+    fn from(value: QueueRequestError) -> Self {
+        todo!()
+    }
 }
 
 impl_has_hr_timer! {
@@ -674,7 +786,7 @@ struct HwQueueContext {
 struct Pdu {
     #[pin]
     timer: HrTimer<Self>,
-    error: Atomic<u32>,
+    error: Atomic<i32>,
 }
 
 impl HrTimerCallback for Pdu {
@@ -715,81 +827,36 @@ impl Operations for NullBlkDevice {
         })
     }
 
-    #[inline(always)]
     fn queue_rq(
         hw_data: Pin<&SpinLock<HwQueueContext>>,
         this: ArcBorrow<'_, Self>,
         rq: Owned<mq::IdleRequest<Self>>,
-        _is_last: bool,
-        is_poll: bool,
+        is_last: bool,
     ) -> BlkResult {
-        if this.bandwidth_limit != 0 {
-            if !this.bandwidth_timer.active() {
-                drop(this.bandwidth_timer_handle.lock().take());
-                let arc: Arc<_> = this.into();
-                *this.bandwidth_timer_handle.lock() =
-                    Some(arc.start(Self::BANDWIDTH_TIMER_INTERVAL));
-            }
+        Ok(Self::queue_rq_internal(hw_data, this, rq, is_last)?)
+    }
 
-            if this
-                .bandwidth_bytes
-                .fetch_add(rq.bytes() as u64, ordering::Relaxed)
-                + (rq.bytes() as u64)
-                > this.bandwidth_limit
-            {
-                rq.queue().stop_hw_queues();
-                if this.bandwidth_bytes.load(ordering::Relaxed) <= this.bandwidth_limit {
-                    rq.queue().start_stopped_hw_queues_async();
+    fn queue_rqs(
+        hw_data: Pin<&SpinLock<HwQueueContext>>,
+        this: ArcBorrow<'_, Self>,
+        requests: &mut RequestList<Self>,
+    ) {
+        let mut requeue = RequestList::new();
+        while let Some(request) = requests.pop() {
+            match Self::queue_rq_internal(hw_data, this, request, false) {
+                Err(QueueRequestError { request, error }) => {
+                    requeue.push_tail(request);
                 }
-
-                return Err(kernel::block::error::code::BLK_STS_DEV_RESOURCE);
+                Ok(()) => (),
             }
         }
 
-        let mut rq = rq.start();
-
-        if rq.command() == mq::Command::Flush {
-            if this.memory_backed {
-                this.storage.flush(&hw_data)?;
-            }
-            this.complete_request(rq);
-
-            return Ok(());
-        }
-
-        #[cfg(CONFIG_BLK_DEV_ZONED)]
-        if this.zoned.enabled {
-            this.handle_zoned_command(&hw_data, &mut rq)?;
-        } else {
-            this.handle_regular_command(&hw_data, &mut rq)?;
-        }
-        #[cfg(not(CONFIG_BLK_DEV_ZONED))]
-        this.handle_regular_command(&hw_data, &mut rq)?;
-
-        if is_poll {
-            // NOTE: We lack the ability to insert `Owned<Request>` into a
-            // `kernel::list::List`, so we use a `RingBuffer` instead. The
-            // drawback of this is that we have to allocate the space for the
-            // ring buffer during drive initialization, and we have to hold the
-            // lock protecting the list until we have processed all the requests
-            // in the list. Change to a linked list when the kernel gets this
-            // ability.
-
-            // NOTE: We are processing requests during submit rather than during
-            // poll. This is different from C driver. C driver does processing
-            // during poll.
-
-            hw_data.lock().poll_queue.push_head(rq)?;
-        } else {
-            this.complete_request(rq);
-        }
-        Ok(())
+        drop(core::mem::replace(requests, requeue));
     }
 
     fn commit_rqs(_hw_data: Pin<&SpinLock<HwQueueContext>>, _queue_data: ArcBorrow<'_, Self>) {}
 
     // TODO: fault injection
-    // TODO: queue_qs
 
     fn poll(
         hw_data: Pin<&SpinLock<HwQueueContext>>,
@@ -803,7 +870,6 @@ impl Operations for NullBlkDevice {
             let status = rq.data_ref().error.load(ordering::Relaxed);
             rq.data_ref().error.store(0, ordering::Relaxed);
 
-            // TODO: check error handling via status
             if let Err(rq) = batch.add_request(rq, status != 0) {
                 Self::end_request(rq);
             }

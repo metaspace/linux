@@ -85,7 +85,7 @@
 //!         pin_init::zeroed::<()>()
 //!     }
 //!
-//!     fn queue_rq(_hw_data: (),_queue_data: (), rq: Owned<IdleRequest<Self>>, _is_last: bool, is_poll: bool) -> BlkResult {
+//!     fn queue_rq(_hw_data: (),_queue_data: (), rq: Owned<IdleRequest<Self>>, _is_last: bool) -> BlkResult {
 //!         rq.start().end_ok();
 //!         Ok(())
 //!     }
@@ -119,6 +119,7 @@
 pub mod gen_disk;
 mod operations;
 mod request;
+mod request_list;
 mod request_queue;
 mod tag_set;
 
@@ -129,6 +130,7 @@ pub use request::Flag as RequestFlag;
 pub use request::IdleRequest;
 pub use request::Request;
 pub use request::RequestTimerHandle;
+pub use request_list::RequestList;
 pub use request_queue::RequestQueue;
 pub use tag_set::Flags as TagSetFlags;
 pub use tag_set::QueueType;
