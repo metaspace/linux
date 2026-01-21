@@ -531,6 +531,16 @@ where
     ///
     /// This is safe because [`Request`] is not dropped during normal operations.
     pub fn dismiss(mut self) {
+        debug_assert!(
+            self.inner
+                .wrapper_ref()
+                .refcount()
+                .as_atomic()
+                .load(ordering::Relaxed)
+                >= 2,
+            "Request refcount must be at least two when an ARef<Request> exist"
+        );
+
         unsafe { core::ptr::drop_in_place(&mut self.inner as *mut ARef<Request<T>>) };
         core::mem::forget(self);
     }
