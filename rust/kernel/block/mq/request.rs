@@ -579,6 +579,17 @@ where
         // SAFETY: `inner` is valid for reads and writes, is properly aligned and nonnull. We have
         // exclusive access to `inner` and we do not access `inner` after this call.
         unsafe { core::ptr::drop_in_place(inner) };
+
+        debug_assert!(
+            self.inner
+                .wrapper_ref()
+                .refcount()
+                .as_atomic()
+                .load(ordering::Relaxed)
+                >= 2,
+            "Request refcount must be at least two when an ARef<Request> exist"
+        );
+
         core::mem::forget(self);
     }
 }
