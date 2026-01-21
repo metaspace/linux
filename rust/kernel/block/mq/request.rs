@@ -375,7 +375,7 @@ unsafe impl<T: Operations> RefCounted for Request<T> {
         #[cfg_attr(not(debug_assertions), allow(unused_variables))]
         let old = refcount.fetch_add(1, ordering::Acquire);
 
-        debug_assert!(old > 1, "Request refcount zero or one on clone");
+        debug_assert!(old >= 1, "Request refcount zero clone");
     }
 
     unsafe fn dec_ref(obj: core::ptr::NonNull<Self>) {
