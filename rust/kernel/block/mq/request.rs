@@ -24,9 +24,10 @@ use core::{
 use crate::block::bio::Bio;
 use crate::block::bio::BioIterator;
 
-use super::{IoCompletionBatch, RequestQueue};
+use super::{IoCompletionBatch, RequestQueue, TagSet};
 
 mod command;
+use bindings::blk_mq_requeue_request;
 pub use command::Command;
 
 mod flag;
@@ -59,6 +60,18 @@ impl<T: Operations> IdleRequest<T> {
 
     pub(crate) unsafe fn from_raw(ptr: *mut bindings::request) -> Owned<Self> {
         unsafe { Owned::from_raw(NonNull::<Self>::new_unchecked(ptr.cast())) }
+    }
+
+    /// Requeue this request at the block layer.
+    ///
+    /// If `kick_requeue_list` is true, this method will schedule processing of
+    /// the requeue list on a workqueue.
+    pub fn requeue(self: Owned<Self>, kick_requeue_list: bool) {
+        let ptr = self.0.0.get();
+        core::mem::forget(self);
+
+        // SAFETY: By type invariant, the wrapped request is valid.
+        unsafe { blk_mq_requeue_request(ptr, kick_requeue_list) };
     }
 }
 
@@ -139,6 +152,13 @@ impl<T: Operations> RequestInner<T> {
         // SAFETY: `hctx` is valid and `driver_data` was produced by a call to
         // `into_foreign` in `Operations::init_hctx_callback`.
         unsafe { T::HwData::borrow((*hctx).driver_data) }
+    }
+
+    /// Get the queue index for the harware queue associated with this request.
+    pub fn queue_index(&self) -> u32 {
+        // SAFETY: The requests is guaranteed to be associated with a hardware
+        // context while we have access to it.
+        unsafe { (*self.hctx_raw()).queue_num }
     }
 
     pub fn is_poll(&self) -> bool {

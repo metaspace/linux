@@ -24,6 +24,9 @@ use kernel::{
 };
 use pin_init::PinInit;
 
+#[cfg(CONFIG_BLK_DEV_RUST_NULL_FAULT_INJECTION)]
+use kernel::fault_injection::FaultConfig;
+
 fn show_field<T: fmt::Display>(value: T, page: &mut [u8; PAGE_SIZE]) -> Result<usize> {
     let mut writer = kernel::str::Formatter::new(page);
     writer.write_fmt(fmt!("{}\n", value))?;
@@ -200,10 +203,39 @@ impl configfs::GroupOperations for Config {
             ],
         };
 
+        use kernel::configfs::CDefaultGroup;
+        let mut default_groups: KVec<Arc<dyn CDefaultGroup>> = KVec::new();
+
+        #[cfg(CONFIG_BLK_DEV_RUST_NULL_FAULT_INJECTION)]
+        let timeout_inject = Arc::pin_init(
+            kernel::fault_injection::FaultConfig::new(c"timeout_inject"),
+            GFP_KERNEL,
+        )?;
+
+        #[cfg(CONFIG_BLK_DEV_RUST_NULL_FAULT_INJECTION)]
+        let requeue_inject = Arc::pin_init(
+            kernel::fault_injection::FaultConfig::new(c"requeue_inject"),
+            GFP_KERNEL,
+        )?;
+
+        #[cfg(CONFIG_BLK_DEV_RUST_NULL_FAULT_INJECTION)]
+        let init_hctx_inject = Arc::pin_init(
+            kernel::fault_injection::FaultConfig::new(c"init_hctx_fault_inject"),
+            GFP_KERNEL,
+        )?;
+
+        #[cfg(CONFIG_BLK_DEV_RUST_NULL_FAULT_INJECTION)]
+        {
+            default_groups.push(timeout_inject.clone(), GFP_KERNEL)?;
+            default_groups.push(requeue_inject.clone(), GFP_KERNEL)?;
+            default_groups.push(init_hctx_inject.clone(), GFP_KERNEL)?;
+        }
+
         let block_size = 4096;
         Ok(configfs::Group::new(
             name.try_into()?,
             item_type,
+            // default_groups,
             // TODO: cannot coerce new_mutex!() to impl PinInit<_, Error>, so put mutex inside
             try_pin_init!( DeviceConfig {
                 data <- new_mutex!(DeviceConfigInner {
@@ -237,8 +269,15 @@ impl configfs::GroupOperations for Config {
                     zone_max_active: 0,
                     zone_append_max_sectors: u32::MAX,
                     fua: true,
+                    #[cfg(CONFIG_BLK_DEV_RUST_NULL_FAULT_INJECTION)]
+                    timeout_inject,
+                    #[cfg(CONFIG_BLK_DEV_RUST_NULL_FAULT_INJECTION)]
+                    requeue_inject,
+                    #[cfg(CONFIG_BLK_DEV_RUST_NULL_FAULT_INJECTION)]
+                    init_hctx_inject,
                 }),
             }),
+            default_groups,
         ))
     }
 }
@@ -321,6 +360,12 @@ struct DeviceConfigInner {
     zone_max_active: u32,
     zone_append_max_sectors: u32,
     fua: bool,
+    #[cfg(CONFIG_BLK_DEV_RUST_NULL_FAULT_INJECTION)]
+    timeout_inject: Arc<FaultConfig>,
+    #[cfg(CONFIG_BLK_DEV_RUST_NULL_FAULT_INJECTION)]
+    requeue_inject: Arc<FaultConfig>,
+    #[cfg(CONFIG_BLK_DEV_RUST_NULL_FAULT_INJECTION)]
+    init_hctx_inject: Arc<FaultConfig>,
 }
 
 #[vtable]
@@ -372,6 +417,12 @@ impl configfs::AttributeOperations<0> for DeviceConfig {
                 guard.zone_max_active,
                 guard.zone_append_max_sectors,
                 guard.fua,
+                #[cfg(CONFIG_BLK_DEV_RUST_NULL_FAULT_INJECTION)]
+                guard.requeue_inject.clone(),
+                #[cfg(CONFIG_BLK_DEV_RUST_NULL_FAULT_INJECTION)]
+                guard.init_hctx_inject.clone(),
+                #[cfg(CONFIG_BLK_DEV_RUST_NULL_FAULT_INJECTION)]
+                guard.timeout_inject.clone(),
             )?);
             guard.powered = true;
         } else if guard.powered && !power_op {
@@ -405,7 +456,7 @@ configfs_attribute!(DeviceConfig, 6,
     })
 );
 
-configfs_attribute!{
+configfs_attribute! {
     DeviceConfig,
     7,
     show: |this, page| show_field(this.data.lock().queue_config.lock().submit_queues, page),
@@ -553,7 +604,7 @@ configfs_simple_field!(DeviceConfig, 23, zone_nr_conv, u32);
 configfs_simple_field!(DeviceConfig, 24, zone_max_open, u32);
 configfs_simple_field!(DeviceConfig, 25, zone_max_active, u32);
 configfs_simple_field!(DeviceConfig, 26, zone_append_max_sectors, u32);
-configfs_attribute!{
+configfs_attribute! {
     DeviceConfig,
     27,
     show: |this, page| show_field(this.data.lock().queue_config.lock().poll_queues, page),

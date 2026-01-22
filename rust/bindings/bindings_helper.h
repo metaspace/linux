@@ -55,6 +55,7 @@
 #include <linux/errname.h>
 #include <linux/ethtool.h>
 #include <linux/fdtable.h>
+#include <linux/fault-inject.h>
 #include <linux/file.h>
 #include <linux/firmware.h>
 #include <linux/interrupt.h>

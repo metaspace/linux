@@ -26,7 +26,7 @@ use kernel::{
             BadBlocks, //
         },
         bio::Segment,
-        error::{BlkError, BlkResult},
+        error::{code::BLK_STS_DEV_RESOURCE, BlkError, BlkResult},
         mq::{
             self,
             gen_disk::{
@@ -39,6 +39,7 @@ use kernel::{
             Operations,
             Request,
             RequestList,
+            RequestTimeoutStatus,
             TagSet, //
         },
         SECTOR_SHIFT,
@@ -88,6 +89,9 @@ use kernel::{
 };
 use pin_init::PinInit;
 use util::*;
+
+#[cfg(CONFIG_BLK_DEV_RUST_NULL_FAULT_INJECTION)]
+use kernel::fault_injection::FaultConfig;
 
 module! {
     type: NullBlkModule,
@@ -199,6 +203,8 @@ module! {
     },
 }
 
+// TODO: Fault inject via params - requires module_params string support.
+
 #[pin_data]
 struct NullBlkModule {
     #[pin]
@@ -261,6 +267,12 @@ impl kernel::InPlaceModule for NullBlkModule {
                     *module_parameters::zone_max_active.value(),
                     *module_parameters::zone_append_max_sectors.value(),
                     *module_parameters::fua.value() != 0,
+                    #[cfg(CONFIG_BLK_DEV_RUST_NULL_FAULT_INJECTION)]
+                    Arc::pin_init(FaultConfig::new(c"requeue_inject"), GFP_KERNEL)?,
+                    #[cfg(CONFIG_BLK_DEV_RUST_NULL_FAULT_INJECTION)]
+                    Arc::pin_init(FaultConfig::new(c"init_hctx_fault_inject"), GFP_KERNEL)?,
+                    #[cfg(CONFIG_BLK_DEV_RUST_NULL_FAULT_INJECTION)]
+                    Arc::pin_init(FaultConfig::new(c"timeout_inject"), GFP_KERNEL)?,
                 )?;
                 disks.push(disk, GFP_KERNEL)?;
             }
@@ -297,6 +309,12 @@ struct NullBlkDevice {
     #[cfg(CONFIG_BLK_DEV_ZONED)]
     #[pin]
     zoned: zoned::ZoneOptions,
+    #[cfg(CONFIG_BLK_DEV_RUST_NULL_FAULT_INJECTION)]
+    requeue_inject: Arc<FaultConfig>,
+    #[cfg(CONFIG_BLK_DEV_RUST_NULL_FAULT_INJECTION)]
+    requeue_selector: kernel::sync::atomic::Atomic<u64>,
+    #[cfg(CONFIG_BLK_DEV_RUST_NULL_FAULT_INJECTION)]
+    timeout_inject: Arc<FaultConfig>,
 }
 
 impl NullBlkDevice {
@@ -331,6 +349,9 @@ impl NullBlkDevice {
         zone_max_active: u32,
         zone_append_max_sectors: u32,
         forced_unit_access: bool,
+        #[cfg(CONFIG_BLK_DEV_RUST_NULL_FAULT_INJECTION)] requeue_inject: Arc<FaultConfig>,
+        #[cfg(CONFIG_BLK_DEV_RUST_NULL_FAULT_INJECTION)] init_hctx_inject: Arc<FaultConfig>,
+        #[cfg(CONFIG_BLK_DEV_RUST_NULL_FAULT_INJECTION)] timeout_inject: Arc<FaultConfig>,
     ) -> Result<Arc<GenDisk<Self>>> {
         let mut flags = mq::TagSetFlags::default();
 
@@ -359,6 +380,8 @@ impl NullBlkDevice {
                         NullBlkTagsetData {
                             queue_depth: hw_queue_depth,
                             queue_config,
+                            #[cfg(CONFIG_BLK_DEV_RUST_NULL_FAULT_INJECTION)]
+                            init_hctx_inject,
                         },
                         GFP_KERNEL,
                     )?,
@@ -407,6 +430,12 @@ impl NullBlkDevice {
                     zone_max_active,
                     zone_append_max_sectors,
                 )?,
+                #[cfg(CONFIG_BLK_DEV_RUST_NULL_FAULT_INJECTION)]
+                requeue_inject,
+                #[cfg(CONFIG_BLK_DEV_RUST_NULL_FAULT_INJECTION)]
+                requeue_selector: Atomic::new(0),
+                #[cfg(CONFIG_BLK_DEV_RUST_NULL_FAULT_INJECTION)]
+                timeout_inject,
             }),
             GFP_KERNEL,
         )?;
@@ -604,7 +633,9 @@ impl NullBlkDevice {
                 badblocks::BlockStatus::None => {}
                 badblocks::BlockStatus::Acknowledged(mut range)
                 | badblocks::BlockStatus::Unacknowledged(mut range) => {
-                    rq.data_ref().error.store(1, ordering::Relaxed);
+                    rq.data_ref()
+                        .error
+                        .store(block::error::code::BLK_STS_IOERR.into(), ordering::Relaxed);
 
                     if self.bad_blocks_once {
                         self.bad_blocks.set_good(range.clone())?;
@@ -629,6 +660,7 @@ impl NullBlkDevice {
         let status = rq.data_ref().error.load(ordering::Relaxed);
         rq.data_ref().error.store(0, ordering::Relaxed);
 
+        // TODO: Use correct error code
         match status {
             0 => rq.end_ok(),
             _ => rq.end(bindings::BLK_STS_IOERR),
@@ -654,6 +686,25 @@ impl NullBlkDevice {
         rq: Owned<mq::IdleRequest<Self>>,
         _is_last: bool,
     ) -> Result<(), QueueRequestError> {
+        #[cfg(CONFIG_BLK_DEV_RUST_NULL_FAULT_INJECTION)]
+        if rq.queue_data().requeue_inject.should_fail(1) {
+            if rq
+                .queue_data()
+                .requeue_selector
+                .fetch_add(1, ordering::Relaxed)
+                & 1
+                == 0
+            {
+                return Err(QueueRequestError {
+                    request: rq,
+                    error: BLK_STS_DEV_RESOURCE,
+                });
+            } else {
+                rq.requeue(true);
+                return Ok(());
+            }
+        }
+
         if this.bandwidth_limit != 0 {
             if !this.bandwidth_timer.active() {
                 drop(this.bandwidth_timer_handle.lock().take());
@@ -682,6 +733,12 @@ impl NullBlkDevice {
 
         let mut rq = rq.start();
 
+        #[cfg(CONFIG_BLK_DEV_RUST_NULL_FAULT_INJECTION)]
+        if rq.queue_data().timeout_inject.should_fail(1) {
+            rq.data_ref().fake_timeout.store(1, ordering::Relaxed);
+            return Ok(());
+        }
+
         if rq.command() == mq::Command::Flush {
             if this.memory_backed {
                 this.storage.flush(&hw_data);
@@ -704,9 +761,13 @@ impl NullBlkDevice {
             Ok(())
         })();
 
-        if let Err(e) = status {
+        if let Err(_) = status {
             // Do not overwrite existing error.
-            rq.data_ref().error.cmpxchg(0, e.to_errno(), ordering::Relaxed);
+            rq.data_ref().error.cmpxchg(
+                0,
+                kernel::block::error::code::BLK_STS_IOERR.into(),
+                ordering::Relaxed,
+            );
         }
 
         if rq.is_poll() {
@@ -742,7 +803,7 @@ struct QueueRequestError {
 
 impl From<QueueRequestError> for BlkError {
     fn from(value: QueueRequestError) -> Self {
-        todo!()
+        kernel::block::error::code::BLK_STS_IOERR
     }
 }
 
@@ -786,7 +847,8 @@ struct HwQueueContext {
 struct Pdu {
     #[pin]
     timer: HrTimer<Self>,
-    error: Atomic<i32>,
+    error: Atomic<u32>,
+    fake_timeout: Atomic<u32>,
 }
 
 impl HrTimerCallback for Pdu {
@@ -811,6 +873,8 @@ kernel::impl_has_hr_timer! {
 struct NullBlkTagsetData {
     queue_depth: u32,
     queue_config: Arc<Mutex<QueueConfig>>,
+    #[cfg(CONFIG_BLK_DEV_RUST_NULL_FAULT_INJECTION)]
+    init_hctx_inject: Arc<FaultConfig>,
 }
 
 #[vtable]
@@ -824,6 +888,7 @@ impl Operations for NullBlkDevice {
         pin_init!(Pdu {
             timer <- HrTimer::new(),
             error: Atomic::new(0),
+            fake_timeout: Atomic::new(0),
         })
     }
 
@@ -856,8 +921,6 @@ impl Operations for NullBlkDevice {
 
     fn commit_rqs(_hw_data: Pin<&SpinLock<HwQueueContext>>, _queue_data: ArcBorrow<'_, Self>) {}
 
-    // TODO: fault injection
-
     fn poll(
         hw_data: Pin<&SpinLock<HwQueueContext>>,
         _this: ArcBorrow<'_, Self>,
@@ -881,6 +944,11 @@ impl Operations for NullBlkDevice {
     }
 
     fn init_hctx(tagset_data: &NullBlkTagsetData, _hctx_idx: u32) -> Result<Self::HwData> {
+        #[cfg(CONFIG_BLK_DEV_RUST_NULL_FAULT_INJECTION)]
+        if tagset_data.init_hctx_inject.should_fail(1) {
+            return Err(EFAULT);
+        }
+
         KBox::pin_init(
             new_spinlock!(HwQueueContext {
                 page: None,
@@ -941,5 +1009,30 @@ impl Operations for NullBlkDevice {
                 qmap.map_queues();
             })
             .unwrap()
+    }
+
+    fn request_timeout(tag_set: &TagSet<Self>, qid: u32, tag: u32) -> RequestTimeoutStatus {
+        if let Some(request) = tag_set.tag_to_rq(qid, tag) {
+            pr_info!("Request timed out\n");
+            // Only fail requests that are faking timeouts. Requests that time
+            // out due to memory pressure will be completed normally.
+            if request.data_ref().fake_timeout.load(ordering::Relaxed) != 0 {
+                request.data_ref().error.store(
+                    block::error::code::BLK_STS_TIMEOUT.into(),
+                    ordering::Relaxed,
+                );
+                request.data_ref().fake_timeout.store(0, ordering::Relaxed);
+
+                if let Ok(request) = OwnableRefCounted::try_from_shared(request) {
+                    Self::end_request(request);
+                    return RequestTimeoutStatus::Completed;
+                }
+                // TODO: pr_warn_once!
+                pr_warn!("Timed out request could not be completed\n");
+            }
+        } else {
+            pr_warn!("Timed out request referenced in timeout handler\n");
+        }
+        RequestTimeoutStatus::RetryLater
     }
 }

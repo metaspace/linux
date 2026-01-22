@@ -39,6 +39,7 @@ pub mod error {
         declare_err!(BLK_STS_NOTSUPP, "Operation not supported.");
         declare_err!(BLK_STS_IOERR, "Generic IO error.");
         declare_err!(BLK_STS_DEV_RESOURCE, "Device resource busy. Retry later.");
+        declare_err!(BLK_STS_TIMEOUT, "Operation timed out.");
     }
 
     #[derive(Clone, Copy, PartialEq, Eq)]
@@ -64,6 +65,19 @@ pub mod error {
             } else {
                 return Some(BlkError(unsafe { NonZeroU8::new_unchecked(errno) }));
             }
+        }
+    }
+
+    impl From<BlkError> for u8 {
+        fn from(value: BlkError) -> Self {
+            value.0.into()
+        }
+    }
+
+    impl From<BlkError> for u32 {
+        fn from(value: BlkError) -> Self {
+            let value: u8 = value.0.into();
+            value.into()
         }
     }
 

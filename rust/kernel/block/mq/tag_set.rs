@@ -7,18 +7,16 @@
 use core::{pin::Pin, ptr::NonNull};
 
 use crate::{
-    bindings,
-    block::mq::{operations::OperationsVTable, request::RequestDataWrapper, Operations},
-    error::{self, Error, Result},
-    prelude::ENOMEM,
-    try_pin_init,
-    types::{ForeignOwnable, Opaque},
+    bindings, block::mq::{operations::OperationsVTable, request::RequestDataWrapper, Operations}, error::{self, Error, Result}, pr_warn, prelude::ENOMEM, sync::atomic::ordering, try_pin_init, types::{ARef, ForeignOwnable, Opaque}
 };
+use bindings::atomic64_add_unless;
 use core::{convert::TryInto, marker::PhantomData};
 use pin_init::{pin_data, pinned_drop, PinInit};
 
 mod flags;
 pub use flags::Flags;
+
+use super::Request;
 
 /// A wrapper for the C `struct blk_mq_tag_set`.
 ///
@@ -140,6 +138,58 @@ impl<T: Operations> TagSet<T> {
     pub fn data(&self) -> <T::TagSetData as ForeignOwnable>::Borrowed<'_> {
         let ptr = unsafe { (*self.inner.get()).driver_data };
         unsafe { T::TagSetData::borrow(ptr) }
+    }
+
+    /// Obtain a shared reference to a request.
+    ///
+    /// This method will hang if the request is not owned by the driver, or if
+    /// the driver holds an [`Ownable<Request>`] reference to the request.
+    pub fn tag_to_rq(&self, qid: u32, tag: u32) -> Option<ARef<Request<T>>> {
+        if qid >= self.hw_queue_count() {
+            // TODO: Use pr_warn_once!
+            pr_warn!("Invalid queue id: {qid}\n");
+            return None;
+        }
+
+        // SAFETY: We checked that `qid` is within bounds.
+        let tags = unsafe { *(*self.inner.get()).tags.add(qid as _) };
+        let rq_ptr = unsafe { bindings::blk_mq_tag_to_rq(tags, tag) };
+        if rq_ptr.is_null() {
+            None
+        } else {
+            let refcount_ptr = unsafe {
+                RequestDataWrapper::refcount_ptr(
+                    Request::wrapper_ptr(rq_ptr.cast::<Request<T>>()).as_ptr(),
+                )
+            };
+            let refcount_ref = unsafe { &*refcount_ptr };
+
+            let atomic_ref = refcount_ref.as_atomic();
+
+            // It is possible for an interrupt to arrive faster than the last
+            // change to the refcount, so retry if the refcount is not what we
+            // think it should be.
+            loop {
+                // Load acquire to sync with store release of `Ownable<Request>`
+                // being destroyed (prevent mutable access overlapping shared
+                // access).
+                let mut prev = atomic_ref.load(ordering::Acquire);
+                if prev >= 1 {
+                    // Store relaxed as no other operations need to happen strictly
+                    // before or after the increment.
+                    match atomic_ref.cmpxchg(prev, prev + 1, ordering::Relaxed) {
+                        Ok(_) => break,
+                        Err(new_prev) => prev = new_prev,
+                    }
+                } else {
+                    // We are probably waiting to observe a refcount increment.
+                    core::hint::spin_loop();
+                    continue;
+                };
+            }
+
+            Some(unsafe { Request::aref_from_raw(rq_ptr) })
+        }
     }
 }
 
