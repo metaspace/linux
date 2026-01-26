@@ -35,6 +35,7 @@ pub struct GenDiskBuilder<T> {
     zone_append_max_sectors: u32,
     write_cache: bool,
     forced_unit_access: bool,
+    max_sectors: u32,
     _p: PhantomData<T>,
 }
 
@@ -51,6 +52,7 @@ impl<T> Default for GenDiskBuilder<T> {
             zone_append_max_sectors: 0,
             write_cache: false,
             forced_unit_access: false,
+            max_sectors: 0,
             _p: PhantomData,
         }
     }
@@ -147,6 +149,12 @@ impl<T: Operations> GenDiskBuilder<T> {
         self
     }
 
+    /// Maximum size of a command in 512 byte sectors.
+    pub fn max_sectors(mut self, sectors: u32) -> Self {
+        self.max_sectors = sectors;
+        self
+    }
+
     /// Build a new `GenDisk` and add it to the VFS.
     pub fn build(
         self,
@@ -166,6 +174,7 @@ impl<T: Operations> GenDiskBuilder<T> {
         lim.logical_block_size = self.logical_block_size;
         lim.physical_block_size = self.physical_block_size;
         lim.max_hw_discard_sectors = self.max_hw_discard_sectors;
+        lim.max_sectors = self.max_sectors;
         if self.rotational {
             lim.features = request::Feature::Rotational.into();
         }

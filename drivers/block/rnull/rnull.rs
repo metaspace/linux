@@ -200,6 +200,10 @@ module! {
             default: 1,
             description: "Enable/disable FUA support when cache_size is used. Default: 1 (true)",
         },
+        max_sectors: u32 {
+            default: 0,
+            description: "Maximum size of a command (in 512B sectors)",
+        },
     },
 }
 
@@ -273,6 +277,7 @@ impl kernel::InPlaceModule for NullBlkModule {
                     Arc::pin_init(FaultConfig::new(c"init_hctx_fault_inject"), GFP_KERNEL)?,
                     #[cfg(CONFIG_BLK_DEV_RUST_NULL_FAULT_INJECTION)]
                     Arc::pin_init(FaultConfig::new(c"timeout_inject"), GFP_KERNEL)?,
+                    *module_parameters::max_sectors.value(),
                 )?;
                 disks.push(disk, GFP_KERNEL)?;
             }
@@ -352,6 +357,7 @@ impl NullBlkDevice {
         #[cfg(CONFIG_BLK_DEV_RUST_NULL_FAULT_INJECTION)] requeue_inject: Arc<FaultConfig>,
         #[cfg(CONFIG_BLK_DEV_RUST_NULL_FAULT_INJECTION)] init_hctx_inject: Arc<FaultConfig>,
         #[cfg(CONFIG_BLK_DEV_RUST_NULL_FAULT_INJECTION)] timeout_inject: Arc<FaultConfig>,
+        max_sectors: u32,
     ) -> Result<Arc<GenDisk<Self>>> {
         let mut flags = mq::TagSetFlags::default();
 
