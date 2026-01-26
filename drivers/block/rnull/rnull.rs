@@ -209,6 +209,10 @@ module! {
             default: 0,
             description: "Set alignment requirement for IO buffers to be page size.",
         },
+        shared_tag_bitmap: u8 {
+            default: 0,
+            description: "Use shared tag bitmap for all submission queues for blk-mq.",
+        },
     },
 }
 
@@ -284,6 +288,7 @@ impl kernel::InPlaceModule for NullBlkModule {
                     Arc::pin_init(FaultConfig::new(c"timeout_inject"), GFP_KERNEL)?,
                     *module_parameters::max_sectors.value(),
                     *module_parameters::virt_boundary.value() != 0,
+                    *module_parameters::shared_tag_bitmap.value() != 0,
                 )?;
                 disks.push(disk, GFP_KERNEL)?;
             }
@@ -365,6 +370,7 @@ impl NullBlkDevice {
         #[cfg(CONFIG_BLK_DEV_RUST_NULL_FAULT_INJECTION)] timeout_inject: Arc<FaultConfig>,
         max_sectors: u32,
         virt_boundary: bool,
+        shared_tag_bitmap: bool,
     ) -> Result<Arc<GenDisk<Self>>> {
         let mut flags = mq::TagSetFlags::default();
 
@@ -374,6 +380,10 @@ impl NullBlkDevice {
 
         if no_sched {
             flags |= mq::TagSetFlags::NO_DEFAULT_SCHEDULER;
+        }
+
+        if shared_tag_bitmap {
+            flags |= mq::TagSetFlags::TAG_HCTX_SHARED;
         }
 
         if home_node > kernel::num_online_nodes().try_into()? {

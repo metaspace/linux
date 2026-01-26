@@ -17,6 +17,9 @@ impl Flags {
     /// hwqs instead of 'mq-deadline'.
     pub const NO_DEFAULT_SCHEDULER: Flags = Flags::new(bindings::BLK_MQ_F_NO_SCHED_BY_DEFAULT);
 
+    /// Use shared tag bitmap for all submission queues.
+    pub const TAG_HCTX_SHARED: Flags = Flags::new(bindings::BLK_MQ_F_TAG_HCTX_SHARED);
+
     pub(crate) fn into_inner(self) -> c_uint {
         self.0
     }

@@ -202,6 +202,7 @@ impl configfs::GroupOperations for Config {
                 fua: 28,
                 max_sectors: 29,
                 virt_boundary: 30,
+                shared_tag_bitmap: 31,
             ],
         };
 
@@ -279,6 +280,7 @@ impl configfs::GroupOperations for Config {
                     init_hctx_inject,
                     max_sectors: 0,
                     virt_boundary: false,
+                    shared_tag_bitmap: false,
                 }),
             }),
             default_groups,
@@ -372,6 +374,7 @@ struct DeviceConfigInner {
     init_hctx_inject: Arc<FaultConfig>,
     max_sectors: u32,
     virt_boundary: bool,
+    shared_tag_bitmap: bool,
 }
 
 #[vtable]
@@ -431,6 +434,7 @@ impl configfs::AttributeOperations<0> for DeviceConfig {
                 guard.timeout_inject.clone(),
                 guard.max_sectors,
                 guard.virt_boundary,
+                guard.shared_tag_bitmap,
             )?);
             guard.powered = true;
         } else if guard.powered && !power_op {
@@ -648,3 +652,4 @@ configfs_attribute! {
 configfs_simple_bool_field!(DeviceConfig, 28, fua);
 configfs_simple_field!(DeviceConfig, 29, max_sectors, u32);
 configfs_simple_bool_field!(DeviceConfig, 30, virt_boundary);
+configfs_simple_bool_field!(DeviceConfig, 31, shared_tag_bitmap);
