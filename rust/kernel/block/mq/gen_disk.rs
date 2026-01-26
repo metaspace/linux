@@ -17,7 +17,7 @@ use crate::{
     sync::{Arc, UniqueArc},
     types::{ForeignOwnable, ScopeGuard},
 };
-use core::{marker::PhantomData, ptr::NonNull};
+use core::{marker::PhantomData, ptr::NonNull, usize};
 
 use super::request;
 
@@ -36,6 +36,7 @@ pub struct GenDiskBuilder<T> {
     write_cache: bool,
     forced_unit_access: bool,
     max_sectors: u32,
+    virt_boundary_mask: usize,
     _p: PhantomData<T>,
 }
 
@@ -53,6 +54,7 @@ impl<T> Default for GenDiskBuilder<T> {
             write_cache: false,
             forced_unit_access: false,
             max_sectors: 0,
+            virt_boundary_mask: 0,
             _p: PhantomData,
         }
     }
@@ -155,6 +157,15 @@ impl<T: Operations> GenDiskBuilder<T> {
         self
     }
 
+    /// Set the I/O segment memory alignment mask for the block device. I/O requests to this device
+    /// will be split between segments wherever either the memory address of the end of the previous
+    /// segment or the memory address of the beginning of the current segment is not aligned to
+    /// virt_boundary_mask + 1 bytes.
+    pub fn virt_boundary_mask(mut self, mask: usize) -> Self {
+        self.virt_boundary_mask = mask;
+        self
+    }
+
     /// Build a new `GenDisk` and add it to the VFS.
     pub fn build(
         self,
@@ -175,6 +186,7 @@ impl<T: Operations> GenDiskBuilder<T> {
         lim.physical_block_size = self.physical_block_size;
         lim.max_hw_discard_sectors = self.max_hw_discard_sectors;
         lim.max_sectors = self.max_sectors;
+        lim.virt_boundary_mask = self.virt_boundary_mask;
         if self.rotational {
             lim.features = request::Feature::Rotational.into();
         }
@@ -265,7 +277,6 @@ impl<T: Operations> GenDiskBuilder<T> {
                 bindings::device_add_disk(core::ptr::null_mut(), gendisk, core::ptr::null_mut())
             },
         )?;
-
 
         Ok(disk)
     }
@@ -367,7 +378,6 @@ impl<T: Operations> GenDiskRef<T> {
     pub(crate) unsafe fn from_ptr(ptr: NonNull<GenDisk<T>>) -> GenDiskRef<T> {
         Self(ptr)
     }
-
 }
 
 unsafe impl<T: Operations> Send for GenDiskRef<T> {}

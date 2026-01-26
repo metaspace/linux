@@ -52,6 +52,7 @@ use kernel::{
     impl_has_hr_timer,
     new_mutex,
     new_spinlock,
+    page::PAGE_SIZE,
     prelude::*,
     revocable::Revocable,
     str::CString,
@@ -204,6 +205,10 @@ module! {
             default: 0,
             description: "Maximum size of a command (in 512B sectors)",
         },
+        virt_boundary: u8 {
+            default: 0,
+            description: "Set alignment requirement for IO buffers to be page size.",
+        },
     },
 }
 
@@ -278,6 +283,7 @@ impl kernel::InPlaceModule for NullBlkModule {
                     #[cfg(CONFIG_BLK_DEV_RUST_NULL_FAULT_INJECTION)]
                     Arc::pin_init(FaultConfig::new(c"timeout_inject"), GFP_KERNEL)?,
                     *module_parameters::max_sectors.value(),
+                    *module_parameters::virt_boundary.value() != 0,
                 )?;
                 disks.push(disk, GFP_KERNEL)?;
             }
@@ -358,6 +364,7 @@ impl NullBlkDevice {
         #[cfg(CONFIG_BLK_DEV_RUST_NULL_FAULT_INJECTION)] init_hctx_inject: Arc<FaultConfig>,
         #[cfg(CONFIG_BLK_DEV_RUST_NULL_FAULT_INJECTION)] timeout_inject: Arc<FaultConfig>,
         max_sectors: u32,
+        virt_boundary: bool,
     ) -> Result<Arc<GenDisk<Self>>> {
         let mut flags = mq::TagSetFlags::default();
 
@@ -454,6 +461,10 @@ impl NullBlkDevice {
             .rotational(rotational)
             .write_cache(storage.cache_enabled())
             .forced_unit_access(forced_unit_access && storage.cache_enabled());
+
+        if virt_boundary {
+            builder = builder.virt_boundary_mask(PAGE_SIZE - 1);
+        }
 
         #[cfg(CONFIG_BLK_DEV_ZONED)]
         {
