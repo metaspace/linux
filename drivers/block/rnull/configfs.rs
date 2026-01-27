@@ -125,6 +125,8 @@ impl configfs::GroupOperations for Config {
                 max_sectors: 29,
                 virt_boundary: 30,
                 shared_tag_bitmap: 31,
+                zone_offline: 32,
+                zone_readonly: 33,
             ],
         };
 
@@ -639,3 +641,81 @@ configfs_simple_bool_field!(DeviceConfig, 28, fua);
 configfs_simple_field!(DeviceConfig, 29, max_sectors, u32);
 configfs_simple_bool_field!(DeviceConfig, 30, virt_boundary);
 configfs_simple_bool_field!(DeviceConfig, 31, shared_tag_bitmap);
+
+#[cfg(CONFIG_BLK_DEV_ZONED)]
+fn set_zone_condition(
+    this: &DeviceConfig,
+    sector: u64,
+    cb: impl FnOnce(
+        &crate::zoned::ZoneOptions,
+        &DiskStorage,
+        &mut crate::zoned::ZoneDescriptor,
+    ) -> Result,
+) -> Result {
+    use crate::zoned::ZoneType;
+    let data_guard = this.data.lock();
+    let null_disk = data_guard.disk.as_ref().ok_or(EBUSY)?.queue_data();
+    let storage = &null_disk.storage;
+    let zone_options = &null_disk.zoned;
+    zone_options.enabled.then_some(()).ok_or(EINVAL)?;
+    let mut zone = zone_options.zone(sector)?.lock();
+
+    if zone.kind == ZoneType::Conventional {
+        return Err(EINVAL);
+    }
+
+    cb(zone_options, storage, &mut zone)
+}
+
+#[cfg(CONFIG_BLK_DEV_ZONED)]
+configfs_attribute!(
+    DeviceConfig,
+    32,
+    show: |_this, _page| Ok(0),
+    store: |this,page| {
+        let text = core::str::from_utf8(page)?.trim();
+        let sector = text.parse().map_err(|_| EINVAL)?;
+
+        set_zone_condition(this, sector, |zone_options, storage, zone| {
+            zone_options.offline_zone(storage, zone)
+        })?;
+        Ok(())
+    },
+);
+
+#[cfg(CONFIG_BLK_DEV_ZONED)]
+configfs_attribute!(
+    DeviceConfig,
+    33,
+    show: |_this, _page| Ok(0),
+    store: |this,page| {
+        let text = core::str::from_utf8(page)?.trim();
+        let sector = text.parse().map_err(|_| EINVAL)?;
+
+        set_zone_condition(this, sector, |zone_options, storage, zone| {
+            zone_options.read_only_zone(storage, zone)
+        })?;
+
+        Ok(())
+    },
+);
+
+#[cfg(not(CONFIG_BLK_DEV_ZONED))]
+configfs_attribute!(
+    DeviceConfig,
+    32,
+    show: |this, page| {Ok(0)},
+    store: |this,page| {
+        Err(ENOTSUPP)
+    },
+);
+
+#[cfg(not(CONFIG_BLK_DEV_ZONED))]
+configfs_attribute!(
+    DeviceConfig,
+    33,
+    show: |this, page| {Ok(0)},
+    store: |this,page| {
+        Err(ENOTSUPP)
+    },
+);

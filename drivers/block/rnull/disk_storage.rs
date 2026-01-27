@@ -65,25 +65,43 @@ impl DiskStorage {
         self.trees.lock()
     }
 
-    pub(crate) fn discard(
-        &self,
-        hw_data: &Pin<&SpinLock<HwQueueContext>>,
-        mut sector: u64,
-        sectors: u32,
-    ) {
-        let mut tree_guard = self.lock();
-        let mut hw_data_guard = hw_data.lock();
-
-        let mut access = self.access(&mut tree_guard, &mut hw_data_guard, None);
+    pub(crate) fn discard(&self, mut sector: u64, sectors: u32) {
+        let tree_guard = self.lock();
+        let mut cache_guard = tree_guard.cache_tree.lock();
+        let mut disk_guard = tree_guard.cache_tree.lock();
 
         let mut remaining_bytes = sectors_to_bytes(sectors);
 
         while remaining_bytes > 0 {
-            access.free_sector(sector);
+            self.free_sector(&mut cache_guard, &mut disk_guard, sector);
             let processed = remaining_bytes.min(self.block_size);
             sector += Into::<u64>::into(bytes_to_sectors(processed));
             remaining_bytes -= processed;
         }
+    }
+
+    fn free_sector_tree(tree_access: &mut xarray::Guard<'_, TreeNode>, sector: u64) {
+        let index = DiskStorageAccess::to_index(sector);
+        if let Some(page) = tree_access.get_mut(index) {
+            page.set_free(sector);
+
+            if page.is_empty() {
+                tree_access.remove(index);
+            }
+        }
+    }
+
+    pub(crate) fn free_sector<'a>(
+        &self,
+        cache_guard: &mut xarray::Guard<'a, TreeNode>,
+        disk_guard: &mut xarray::Guard<'a, TreeNode>,
+        sector: u64,
+    ) {
+        if self.cache_size > 0 {
+            Self::free_sector_tree(cache_guard, sector);
+        }
+
+        Self::free_sector_tree(disk_guard, sector);
     }
 
     pub(crate) fn flush(&self, hw_data: &Pin<&SpinLock<HwQueueContext>>) {
@@ -261,25 +279,6 @@ impl<'a, 'b, 'c> DiskStorageAccess<'a, 'b, 'c> {
         } else {
             self.disk_guard.get(index)
         }
-    }
-
-    fn free_sector_tree(tree_access: &mut xarray::Guard<'_, TreeNode>, sector: u64) {
-        let index = Self::to_index(sector);
-        if let Some(page) = tree_access.get_mut(index) {
-            page.set_free(sector);
-
-            if page.is_empty() {
-                tree_access.remove(index);
-            }
-        }
-    }
-
-    pub(crate) fn free_sector(&mut self, sector: u64) {
-        if self.disk_storage.cache_size > 0 {
-            Self::free_sector_tree(&mut self.cache_guard, sector);
-        }
-
-        Self::free_sector_tree(&mut self.disk_guard, sector);
     }
 }
 
