@@ -199,10 +199,10 @@ impl super::NullBlkDevice {
 
         use mq::Command::*;
         match rq.command() {
-            ZoneOpen => self.zoned.open_zone(&mut zone, rq.sector()),
+            ZoneOpen => self.zoned.open_zone(&mut zone),
             ZoneClose => self.zoned.close_zone(&mut zone),
             ZoneReset => self.zoned.reset_zone(&self.storage, hw_data, &mut zone),
-            ZoneFinish => self.zoned.finish_zone(&mut zone, rq.sector()),
+            ZoneFinish => self.zoned.finish_zone(&mut zone),
             _ => Err(EIO),
         }
     }
@@ -268,7 +268,7 @@ impl super::NullBlkDevice {
             if self.zoned.use_accounting() {
                 let mut accounting = self.zoned.accounting.lock();
                 self.zoned
-                    .check_zone_resources(&mut accounting, &mut zone, rq.sector())?;
+                    .check_zone_resources(&mut accounting, &mut zone)?;
 
                 if zone.condition == ZoneCondition::Closed {
                     accounting.closed -= 1;
@@ -351,7 +351,7 @@ impl ZoneOptions {
         (sector >> self.size_sectors.ilog2()) as usize
     }
 
-    fn zone(&self, sector: u64) -> Result<&Mutex<ZoneDescriptor>> {
+    pub(crate) fn zone(&self, sector: u64) -> Result<&Mutex<ZoneDescriptor>> {
         self.zones.get(self.zone_no(sector)).ok_or(EINVAL)
     }
 
@@ -404,7 +404,7 @@ impl ZoneOptions {
         Err(EINVAL)
     }
 
-    fn open_zone(&self, zone: &mut ZoneDescriptor, sector: u64) -> Result {
+    fn open_zone(&self, zone: &mut ZoneDescriptor) -> Result {
         if zone.kind == ZoneType::Conventional {
             return Err(EINVAL);
         }
@@ -420,13 +420,13 @@ impl ZoneOptions {
             let mut accounting = self.accounting.lock();
             match zone.condition {
                 Empty => {
-                    self.check_zone_resources(&mut accounting, zone, sector)?;
+                    self.check_zone_resources(&mut accounting, zone)?;
                 }
                 ImplicitOpen => {
                     accounting.implicit_open -= 1;
                 }
                 Closed => {
-                    self.check_zone_resources(&mut accounting, zone, sector)?;
+                    self.check_zone_resources(&mut accounting, zone)?;
                     accounting.closed -= 1;
                 }
                 _ => (),
@@ -443,14 +443,13 @@ impl ZoneOptions {
         &self,
         accounting: &mut ZoneAccounting,
         zone: &mut ZoneDescriptor,
-        sector: u64,
     ) -> Result {
         match zone.condition {
             ZoneCondition::Empty => {
                 self.check_active_zones(accounting)?;
-                self.check_open_zones(accounting, sector)
+                self.check_open_zones(accounting, zone.start_sector)
             }
-            ZoneCondition::Closed => self.check_open_zones(accounting, sector),
+            ZoneCondition::Closed => self.check_open_zones(accounting, zone.start_sector),
             _ => Err(EIO),
         }
     }
@@ -519,7 +518,7 @@ impl ZoneOptions {
         Ok(())
     }
 
-    fn finish_zone(&self, zone: &mut ZoneDescriptor, sector: u64) -> Result {
+    fn finish_zone(&self, zone: &mut ZoneDescriptor) -> Result {
         if zone.kind == ZoneType::Conventional {
             return Err(EINVAL);
         }
@@ -531,12 +530,12 @@ impl ZoneOptions {
             match zone.condition {
                 Full => return Ok(()),
                 Empty => {
-                    self.check_zone_resources(&mut accounting, zone, sector)?;
+                    self.check_zone_resources(&mut accounting, zone)?;
                 }
                 ImplicitOpen => accounting.implicit_open -= 1,
                 ExplicitOpen => accounting.explicit_open -= 1,
                 Closed => {
-                    self.check_zone_resources(&mut accounting, zone, sector)?;
+                    self.check_zone_resources(&mut accounting, zone)?;
                     accounting.closed -= 1;
                 }
                 _ => return Err(EIO),
@@ -575,16 +574,55 @@ impl ZoneOptions {
         zone.condition = ZoneCondition::Empty;
         zone.write_pointer = zone.start_sector;
 
-        storage.discard(hw_data, zone.start_sector, zone.size_sectors);
+        storage.discard(zone.start_sector, zone.size_sectors);
 
         Ok(())
+    }
+
+    fn set_zone_condition(
+        &self,
+        storage: &crate::disk_storage::DiskStorage,
+        zone: &mut ZoneDescriptor,
+        condition: ZoneCondition,
+    ) -> Result {
+        if zone.condition == condition {
+            zone.condition = ZoneCondition::Empty;
+            zone.write_pointer = zone.start_sector;
+            storage.discard(zone.start_sector, zone.size_sectors);
+        } else {
+            if matches!(
+                zone.condition,
+                ZoneCondition::ReadOnly | ZoneCondition::Offline
+            ) {
+                self.finish_zone(zone)?;
+            }
+
+            zone.condition = ZoneCondition::Offline;
+            zone.write_pointer = u64::MAX;
+        }
+        Ok(())
+    }
+    pub(crate) fn offline_zone(
+        &self,
+        storage: &crate::disk_storage::DiskStorage,
+        zone: &mut ZoneDescriptor,
+    ) -> Result {
+        self.set_zone_condition(storage, zone, ZoneCondition::Offline)
+    }
+
+    pub(crate) fn read_only_zone(
+        &self,
+        storage: &crate::disk_storage::DiskStorage,
+        zone: &mut ZoneDescriptor,
+    ) -> Result {
+        self.set_zone_condition(storage, zone, ZoneCondition::ReadOnly)
     }
 }
 
 pub(crate) struct ZoneDescriptor {
     start_sector: u64,
     size_sectors: u32,
-    kind: ZoneType,
+    pub(crate) kind: ZoneType,
     capacity_sectors: u32,
     write_pointer: u64,
     condition: ZoneCondition,
@@ -612,7 +650,7 @@ impl ZoneDescriptor {
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 #[repr(u32)]
-enum ZoneType {
+pub(crate) enum ZoneType {
     Conventional = bindings::blk_zone_type_BLK_ZONE_TYPE_CONVENTIONAL,
     SequentialWriteRequired = bindings::blk_zone_type_BLK_ZONE_TYPE_SEQWRITE_REQ,
     #[expect(dead_code)]
