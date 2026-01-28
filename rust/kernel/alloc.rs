@@ -99,6 +99,10 @@ pub mod flags {
     /// The same as [`GFP_KERNEL`], except the allocation is accounted to kmemcg.
     pub const GFP_KERNEL_ACCOUNT: Flags = Flags(bindings::GFP_KERNEL_ACCOUNT);
 
+    /// [`GFP_NOIO`] will use direct reclaim to discard clean pages or slab
+    /// pages that do not require the starting of any physical IO.
+    pub const GFP_NOIO: Flags = Flags(bindings::GFP_NOIO);
+
     /// For kernel allocations that should not stall for direct reclaim, start physical IO or
     /// use any filesystem callback.  It is very likely to fail to allocate memory, even for very
     /// small allocations.
