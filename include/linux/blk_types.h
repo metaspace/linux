@@ -271,7 +271,7 @@ struct bio {
 	 * Everything starting with bi_max_vecs will be preserved by bio_reset()
 	 */
 
-	unsigned short		bi_max_vecs;	/* max bvl_vecs we can hold */
+	unsigned short		bi_max_vecs;	/* max count of bio_vec we can hold */
 
 	atomic_t		__bi_cnt;	/* pin count */
 
