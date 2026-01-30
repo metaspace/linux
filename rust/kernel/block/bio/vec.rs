@@ -13,14 +13,21 @@ use core::mem::ManuallyDrop;
 
 /// A segment of an IO request.
 ///
-/// [`Segment`] represents a contiguous range of physical memory addresses of an
-/// IO request. A segment has a offset and a length, representing the amount of
-/// data that needs to be processed. Processing the data increases the offset
-/// and reduces the length.
+/// [`Segment`] represents a contiguous range of physical memory addresses of an IO request. A
+/// segment has a offset and a length, representing the amount of data that needs to be processed.
+/// Processing the data increases the offset and reduces the length.
 ///
-/// The data buffer of a [`Segment`] is mutably borrowed from the owning `Bio`.
+/// The data buffer of a [`Segment`] is borrowed from a `Bio`.
 ///
-/// A wrapper around a `strutct bio_vec`.
+/// # Implementation details
+///
+/// In the context of user driven block IO, the pages backing a [`Segment`] are often mapped to user
+/// space concurrently with the IO operation. Further, the page backing a `Segment` may be part of
+/// multiple IO operations, if user space decides to issue multiple concurrent IO operations
+/// involving the same page. Thus, the data represented by a [`Segment`] must always be assumed to
+/// be subject to racy writes.
+///
+/// A [`Segemnt`] is a wrapper around a `strutct bio_vec`.
 ///
 /// # Invariants
 ///
@@ -114,9 +121,8 @@ impl Segment<'_> {
                 // SAFETY:
                 // - If `with_pointer_into_page` calls this closure, it has performed bounds
                 //   checking and guarantees that `src` is valid for `length` bytes.
-                // - TODO: User space might write src_page at any time?
                 // - We have exclusive ownership of `dst_page` and thus this write wil not race.
-                unsafe { dst_page.write_raw(src, dst_offset, length) }
+                unsafe { dst_page.write_raw_fromio(src, dst_offset, length) }
             })
             .expect("Assertion failure, bounds check failed.");
 
@@ -150,10 +156,9 @@ impl Segment<'_> {
                 // SAFETY:
                 // - If `with_pointer_into_page` calls this closure, then it has performed bounds
                 //   checks and guarantees that `dst` is valid for `length` bytes.
-                // - TODO: Nothing prevents user space from writing to dst_page?
                 // - Since we have a shared reference to `src_page`, the read cannot race with any
                 //   writes to `src_page`.
-                unsafe { src_page.read_raw(dst, src_offset, length) }
+                unsafe { src_page.read_raw_toio(dst, src_offset, length) }
             })
             .expect("Assertion failure, bounds check failed.");
 
@@ -208,7 +213,7 @@ impl core::fmt::Display for Segment<'_> {
 ///
 /// If `iter.bi_size` > 0, `iter` must always index a valid `bio_vec` in `bio.io_vec()`.
 pub struct BioSegmentIterator<'a> {
-    bio: &'a Bio,
+    bio: &'a mut Bio,
     iter: bindings::bvec_iter,
 }
 
@@ -216,13 +221,12 @@ impl<'a> BioSegmentIterator<'a> {
     /// Creeate a new segemnt iterator for iterating the segments of `bio`. The
     /// iterator starts at the beginning of `bio`.
     #[inline(always)]
-    pub(crate) fn new(bio: &'a Bio) -> BioSegmentIterator<'_> {
+    pub(crate) fn new(bio: &'a mut Bio) -> BioSegmentIterator<'_> {
+        let iter = bio.raw_iter();
+
         // SAFETY: `bio.raw_iter()` returns an index that indexes into a valid
         // `bio_vec` in `bio.io_vec()`.
-        Self {
-            bio,
-            iter: bio.raw_iter(),
-        }
+        Self { bio, iter }
     }
 
     // The accessors in this implementation block are modelled after C side
@@ -375,14 +379,11 @@ impl<'a> BioSegmentIterator<'a> {
     }
 }
 
-impl<'a> crate::types::BorrowIterator for BioSegmentIterator<'a> {
-    type Item<'b>
-        = Segment<'b>
-    where
-        Self: 'b;
+impl<'a> core::iter::Iterator for BioSegmentIterator<'a> {
+    type Item = Segment<'a>;
 
     #[inline(always)]
-    fn next(&mut self) -> Option<Self::Item<'_>> {
+    fn next(&mut self) -> Option<Self::Item> {
         if self.iter.bi_size == 0 {
             return None;
         }

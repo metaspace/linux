@@ -15,7 +15,16 @@ pub use vec::Segment;
 
 use crate::types::Opaque;
 
-/// A block device IO descriptor (`struct bio`)
+/// A block device IO descriptor (`struct bio`).
+///
+/// A `Bio` is the main unit of IO for the block layer. It describes an IO command and associated
+/// data buffers.
+///
+/// The data buffers associated with a `Bio` are represented by a vector of [`Segment`]s. These
+/// segments represent physically contiguous regions of memory. The memory is represented by
+/// [`Page`] descriptors internally.
+///
+/// The vector of [`Segment`]s can be iterated by obtaining a [`SegmentIterator`].
 ///
 /// # Invariants
 ///
