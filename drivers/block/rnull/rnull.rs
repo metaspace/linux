@@ -82,7 +82,6 @@ use kernel::{
     },
     types::{
         ARef,
-        BorrowIterator,
         OwnableRefCounted,
         Owned, //
     },
