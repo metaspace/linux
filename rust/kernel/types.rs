@@ -14,6 +14,7 @@ use pin_init::{PinInit, Wrapper, Zeroable};
 pub use crate::{
     owned::{
         Ownable,
+        OwnableRefCounted,
         Owned, //
     },
     sync::aref::{
