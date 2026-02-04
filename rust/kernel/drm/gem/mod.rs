@@ -10,8 +10,7 @@ use crate::{
     drm::driver::{AllocImpl, AllocOps},
     error::{to_result, Result},
     prelude::*,
-    sync::aref::{ARef, AlwaysRefCounted},
-    types::Opaque,
+    types::{ARef, AlwaysRefCounted, Opaque},
 };
 use core::{ops::Deref, ptr::NonNull};
 
@@ -253,7 +252,7 @@ impl<T: DriverObject> Object<T> {
 }
 
 // SAFETY: Instances of `Object<T>` are always reference-counted.
-unsafe impl<T: DriverObject> crate::types::AlwaysRefCounted for Object<T> {
+unsafe impl<T: DriverObject> crate::types::RefCounted for Object<T> {
     fn inc_ref(&self) {
         // SAFETY: The existence of a shared reference guarantees that the refcount is non-zero.
         unsafe { bindings::drm_gem_object_get(self.as_raw()) };
@@ -267,6 +266,9 @@ unsafe impl<T: DriverObject> crate::types::AlwaysRefCounted for Object<T> {
         unsafe { bindings::drm_gem_object_put(obj.as_raw()) }
     }
 }
+// SAFETY: We do not implement `Ownable`, thus it is okay to obtain an `ARef<Device>` from a
+// `&Object`.
+unsafe impl<T: DriverObject> crate::types::AlwaysRefCounted for Object<T> {}
 
 impl<T: DriverObject> super::private::Sealed for Object<T> {}
 

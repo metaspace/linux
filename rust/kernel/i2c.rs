@@ -17,8 +17,10 @@ use crate::{
     of,
     prelude::*,
     types::{
+        ARef,
         AlwaysRefCounted,
-        Opaque, //
+        Opaque,
+        RefCounted, //
     }, //
 };
 
@@ -30,8 +32,6 @@ use core::{
         NonNull, //
     }, //
 };
-
-use kernel::types::ARef;
 
 /// An I2C device id table.
 #[repr(transparent)]
@@ -416,7 +416,7 @@ kernel::impl_device_context_deref!(unsafe { I2cAdapter });
 kernel::impl_device_context_into_aref!(I2cAdapter);
 
 // SAFETY: Instances of `I2cAdapter` are always reference-counted.
-unsafe impl crate::types::AlwaysRefCounted for I2cAdapter {
+unsafe impl crate::types::RefCounted for I2cAdapter {
     fn inc_ref(&self) {
         // SAFETY: The existence of a shared reference guarantees that the refcount is non-zero.
         unsafe { bindings::i2c_get_adapter(self.index()) };
@@ -427,6 +427,9 @@ unsafe impl crate::types::AlwaysRefCounted for I2cAdapter {
         unsafe { bindings::i2c_put_adapter(obj.as_ref().as_raw()) }
     }
 }
+// SAFETY: We do not implement `Ownable`, thus it is okay to obtain an `ARef<Device>` from an
+// `&I2cAdapter`.
+unsafe impl AlwaysRefCounted for I2cAdapter {}
 
 /// The i2c board info representation
 ///
@@ -492,7 +495,7 @@ kernel::impl_device_context_deref!(unsafe { I2cClient });
 kernel::impl_device_context_into_aref!(I2cClient);
 
 // SAFETY: Instances of `I2cClient` are always reference-counted.
-unsafe impl AlwaysRefCounted for I2cClient {
+unsafe impl RefCounted for I2cClient {
     fn inc_ref(&self) {
         // SAFETY: The existence of a shared reference guarantees that the refcount is non-zero.
         unsafe { bindings::get_device(self.as_ref().as_raw()) };
@@ -503,6 +506,9 @@ unsafe impl AlwaysRefCounted for I2cClient {
         unsafe { bindings::put_device(&raw mut (*obj.as_ref().as_raw()).dev) }
     }
 }
+// SAFETY: We do not implement `Ownable`, thus it is okay to obtain an `ARef<Device>` from an
+// `&I2cClient`.
+unsafe impl AlwaysRefCounted for I2cClient {}
 
 impl<Ctx: device::DeviceContext> AsRef<device::Device<Ctx>> for I2cClient<Ctx> {
     fn as_ref(&self) -> &device::Device<Ctx> {

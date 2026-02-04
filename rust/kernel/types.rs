@@ -18,7 +18,8 @@ pub use crate::{
     },
     sync::aref::{
         ARef,
-        AlwaysRefCounted, //
+        AlwaysRefCounted,
+        RefCounted, //
     }, //
 };
 
