@@ -35,6 +35,8 @@ use kernel::{
         SBox,
         StaticSheaf, //
     },
+    str::CStr,
+    sync::LockClassKey,
     types::{
         ForeignOwnable,
         NotThreadSafe,
@@ -49,6 +51,19 @@ use pin_init::{
     Init,
     PinInit, //
 };
+
+/// Creates a [`XArray`] initialiser with the given name and a newly-created lock class.
+///
+/// It uses the name if one is given, otherwise it generates one based on the file name and line
+/// number.
+#[macro_export]
+macro_rules! new_xarray {
+    ($kind:expr $(, $name:literal)? $(,)?) => {
+        $crate::xarray::XArray::new(
+            $kind, $crate::optional_name!($($name)?), $crate::static_lock_class!())
+    };
+}
+pub use new_xarray;
 
 /// Sheaf of preallocated [`XArray`] nodes.
 pub type XArraySheaf<'a> = StaticSheaf<'a, XArrayNode>;
@@ -104,9 +119,10 @@ impl kernel::mm::sheaf::KMemCacheInit<XArrayNode> for XArrayNode {
 ///
 /// ```rust
 /// use kernel::alloc::KBox;
-/// use kernel::xarray::{AllocKind, XArray};
+/// use kernel::xarray::{new_xarray, AllocKind, XArray};
 ///
-/// let xa = KBox::pin_init(XArray::new(AllocKind::Alloc1), GFP_KERNEL)?;
+/// let xa: Pin<KBox<XArray<KBox<u32>>>> =
+///     KBox::pin_init(new_xarray!(AllocKind::Alloc1), GFP_KERNEL)?;
 ///
 /// let dead = KBox::new(0xdead, GFP_KERNEL)?;
 /// let beef = KBox::new(0xbeef, GFP_KERNEL)?;
@@ -166,7 +182,11 @@ pub enum AllocKind {
 
 impl<T: ForeignOwnable> XArray<T> {
     /// Creates a new initializer for this type.
-    pub fn new(kind: AllocKind) -> impl PinInit<Self> {
+    pub fn new(
+        kind: AllocKind,
+        name: &'static CStr,
+        key: Pin<&'static LockClassKey>,
+    ) -> impl PinInit<Self> {
         let flags = match kind {
             AllocKind::Alloc => bindings::XA_FLAGS_ALLOC,
             AllocKind::Alloc1 => bindings::XA_FLAGS_ALLOC1,
@@ -175,8 +195,14 @@ impl<T: ForeignOwnable> XArray<T> {
             // SAFETY: `xa` is valid while the closure is called.
             //
             // INVARIANT: `xa` is initialized here to an empty, valid [`bindings::xarray`].
-            xa <- Opaque::ffi_init(|xa| unsafe {
-                bindings::xa_init_flags(xa, flags)
+            xa <- Opaque::ffi_init(|xa: *mut bindings::xarray| unsafe {
+                bindings::__spin_lock_init(
+                    &raw mut (*xa).xa_lock,
+                    name.as_ptr().cast(),
+                    key.as_ptr(),
+                );
+                (*xa).xa_flags = flags;
+                (*xa).xa_head = null_mut();
             }),
             _p: PhantomData,
         })
@@ -281,8 +307,8 @@ impl<'a, T: ForeignOwnable> Guard<'a, T> {
     /// # Examples
     ///
     /// ```
-    /// # use kernel::{alloc::{flags::GFP_KERNEL, kbox::KBox}, xarray::{AllocKind, XArray}};
-    /// let xa = KBox::pin_init(XArray::new(AllocKind::Alloc), GFP_KERNEL)?;
+    /// # use kernel::{alloc::{flags::GFP_KERNEL, kbox::KBox}, new_xarray, xarray::AllocKind};
+    /// let xa = KBox::pin_init(new_xarray!(AllocKind::Alloc), GFP_KERNEL)?;
     ///
     /// let mut guard = xa.lock();
     /// assert_eq!(guard.contains_index(42), false);
@@ -317,8 +343,8 @@ impl<'a, T: ForeignOwnable> Guard<'a, T> {
     /// # Examples
     ///
     /// ```
-    /// # use kernel::{prelude::*, xarray::{AllocKind, XArray, Entry}};
-    /// let mut xa = KBox::pin_init(XArray::<KBox<u32>>::new(AllocKind::Alloc), GFP_KERNEL)?;
+    /// # use kernel::{prelude::*, new_xarray, xarray::{AllocKind, XArray, Entry}};
+    /// let mut xa: Pin<KBox<XArray<KBox<u32>>>> = KBox::pin_init(new_xarray!(AllocKind::Alloc), GFP_KERNEL)?;
     /// let mut guard = xa.lock();
     ///
     /// assert_eq!(guard.contains_index(42), false);
@@ -350,8 +376,8 @@ impl<'a, T: ForeignOwnable> Guard<'a, T> {
     /// # Examples
     ///
     /// ```
-    /// # use kernel::{prelude::*, xarray::{AllocKind, XArray}};
-    /// let mut xa = KBox::pin_init(XArray::<KBox<u32>>::new(AllocKind::Alloc), GFP_KERNEL)?;
+    /// # use kernel::{prelude::*, new_xarray, xarray::{AllocKind, XArray}};
+    /// let mut xa: Pin<KBox<XArray<KBox<u32>>>> = KBox::pin_init(new_xarray!(AllocKind::Alloc), GFP_KERNEL)?;
     /// let mut guard = xa.lock();
     ///
     /// guard.store(10, KBox::new(10u32, GFP_KERNEL)?, GFP_KERNEL)?;
@@ -380,8 +406,8 @@ impl<'a, T: ForeignOwnable> Guard<'a, T> {
     /// # Examples
     ///
     /// ```
-    /// # use kernel::{prelude::*, xarray::{AllocKind, XArray}};
-    /// let mut xa = KBox::pin_init(XArray::<KBox<u32>>::new(AllocKind::Alloc), GFP_KERNEL)?;
+    /// # use kernel::{prelude::*, new_xarray, xarray::{AllocKind, XArray}};
+    /// let mut xa: Pin<KBox<XArray<KBox<u32>>>> = KBox::pin_init(new_xarray!(AllocKind::Alloc), GFP_KERNEL)?;
     /// let mut guard = xa.lock();
     ///
     /// guard.store(10, KBox::new(10u32, GFP_KERNEL)?, GFP_KERNEL)?;
@@ -407,8 +433,8 @@ impl<'a, T: ForeignOwnable> Guard<'a, T> {
     /// # Examples
     ///
     /// ```
-    /// # use kernel::{prelude::*, xarray::{AllocKind, XArray}};
-    /// let mut xa = KBox::pin_init(XArray::<KBox<u32>>::new(AllocKind::Alloc), GFP_KERNEL)?;
+    /// # use kernel::{prelude::*, new_xarray, xarray::{AllocKind, XArray}};
+    /// let mut xa: Pin<KBox<XArray<KBox<u32>>>> = KBox::pin_init(new_xarray!(AllocKind::Alloc), GFP_KERNEL)?;
     /// let mut guard = xa.lock();
     ///
     /// guard.store(10, KBox::new(10u32, GFP_KERNEL)?, GFP_KERNEL)?;
@@ -438,8 +464,8 @@ impl<'a, T: ForeignOwnable> Guard<'a, T> {
     /// # Examples
     ///
     /// ```
-    /// # use kernel::{prelude::*, xarray::{AllocKind, XArray}};
-    /// let mut xa = KBox::pin_init(XArray::<KBox<u32>>::new(AllocKind::Alloc), GFP_KERNEL)?;
+    /// # use kernel::{prelude::*, new_xarray, xarray::{AllocKind, XArray}};
+    /// let mut xa: Pin<KBox<XArray<KBox<u32>>>> = KBox::pin_init(new_xarray!(AllocKind::Alloc), GFP_KERNEL)?;
     /// let mut guard = xa.lock();
     ///
     /// guard.store(100, KBox::new(42u32, GFP_KERNEL)?, GFP_KERNEL)?;
@@ -542,8 +568,8 @@ impl<'a, T: ForeignOwnable> Guard<'a, T> {
     /// # Examples
     ///
     /// ```
-    /// # use kernel::{prelude::*, xarray::{AllocKind, XArray}};
-    /// let mut xa = KBox::pin_init(XArray::<KBox<u32>>::new(AllocKind::Alloc), GFP_KERNEL)?;
+    /// # use kernel::{prelude::*, new_xarray, xarray::{AllocKind, XArray}};
+    /// let mut xa: Pin<KBox<XArray<KBox<u32>>>> = KBox::pin_init(new_xarray!(AllocKind::Alloc), GFP_KERNEL)?;
     /// let mut guard = xa.lock();
     ///
     /// assert_eq!(guard.get(42), None);
