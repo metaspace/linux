@@ -1,5 +1,5 @@
 use super::HwQueueContext;
-use crate::util::*;
+use crate::{util::*, NullBlkDevice};
 use core::pin::Pin;
 use kernel::{
     block,
@@ -18,7 +18,8 @@ use kernel::{
     uapi::PAGE_SECTORS,
     xarray::{
         self,
-        XArray, //
+        XArray,
+        XArraySheaf, //
     }, //
 };
 pub(crate) use page::NullBlockPage;
@@ -49,23 +50,20 @@ impl DiskStorage {
         })
     }
 
-    pub(crate) fn access<'a, 'b>(
+    pub(crate) fn access<'a, 'b, 'c>(
         &'a self,
         tree_guard: &'a mut SpinLockGuard<'b, Pin<KBox<TreeContainer>>>,
         hw_data_guard: &'a mut SpinLockGuard<'b, HwQueueContext>,
-    ) -> DiskStorageAccess<'a, 'b> {
-        DiskStorageAccess::new(self, tree_guard, hw_data_guard)
+        sheaf: Option<XArraySheaf<'c>>,
+    ) -> DiskStorageAccess<'a, 'b, 'c> {
+        DiskStorageAccess::new(self, tree_guard, hw_data_guard, sheaf)
     }
 
     pub(crate) fn lock(&self) -> SpinLockGuard<'_, Pin<KBox<TreeContainer>>> {
         self.trees.lock()
     }
 
-    pub(crate) fn discard(
-        &self,
-        mut sector: u64,
-        sectors: u32,
-    ) {
+    pub(crate) fn discard(&self, mut sector: u64, sectors: u32) {
         let tree_guard = self.lock();
         let mut cache_guard = tree_guard.cache_tree.lock();
         let mut disk_guard = tree_guard.cache_tree.lock();
@@ -107,7 +105,7 @@ impl DiskStorage {
     pub(crate) fn flush(&self, hw_data: &Pin<&SpinLock<HwQueueContext>>) {
         let mut tree_guard = self.lock();
         let mut hw_data_guard = hw_data.lock();
-        let mut access = self.access(&mut tree_guard, &mut hw_data_guard);
+        let mut access = self.access(&mut tree_guard, &mut hw_data_guard, None);
         access.flush();
     }
 
@@ -116,24 +114,27 @@ impl DiskStorage {
     }
 }
 
-pub(crate) struct DiskStorageAccess<'a, 'b> {
+pub(crate) struct DiskStorageAccess<'a, 'b, 'c> {
     cache_guard: xarray::Guard<'a, TreeNode>,
     disk_guard: xarray::Guard<'a, TreeNode>,
     hw_data_guard: &'a mut SpinLockGuard<'b, HwQueueContext>,
     disk_storage: &'a DiskStorage,
+    pub(crate) sheaf: Option<XArraySheaf<'c>>,
 }
 
-impl<'a, 'b> DiskStorageAccess<'a, 'b> {
+impl<'a, 'b, 'c> DiskStorageAccess<'a, 'b, 'c> {
     fn new(
         disk_storage: &'a DiskStorage,
         tree_guard: &'a mut SpinLockGuard<'b, Pin<KBox<TreeContainer>>>,
         hw_data_guard: &'a mut SpinLockGuard<'b, HwQueueContext>,
+        sheaf: Option<XArraySheaf<'c>>,
     ) -> Self {
         Self {
             cache_guard: tree_guard.cache_tree.lock(),
             disk_guard: tree_guard.disk_tree.lock(),
             hw_data_guard,
             disk_storage,
+            sheaf,
         }
     }
     fn to_index(sector: u64) -> usize {
@@ -166,10 +167,10 @@ impl<'a, 'b> DiskStorageAccess<'a, 'b> {
             ordering::Relaxed,
         );
 
-        let page = match self.disk_guard.get_entry(index) {
+        let page = match self.disk_guard.entry(index) {
             xarray::Entry::Vacant(disk_entry) => {
                 disk_entry
-                    .insert(cache_entry.remove(), Some(&mut self.hw_data_guard.preload))
+                    .insert(cache_entry.remove(), self.sheaf.as_mut())
                     .expect("Preload is set up to allow insert without failure");
                 self.hw_data_guard
                     .page
@@ -230,7 +231,7 @@ impl<'a, 'b> DiskStorageAccess<'a, 'b> {
             };
             Ok(self
                 .cache_guard
-                .insert_entry(index, page, Some(&mut self.hw_data_guard.preload))
+                .insert_entry(index, page, self.sheaf.as_mut())
                 .expect("Should be able to insert")
                 .into_mut())
         }
@@ -245,13 +246,13 @@ impl<'a, 'b> DiskStorageAccess<'a, 'b> {
     fn get_disk_page(&mut self, sector: u64) -> Result<&mut NullBlockPage> {
         let index = Self::to_index(sector);
 
-        let page = match self.disk_guard.get_entry(index) {
+        let page = match self.disk_guard.entry(index) {
             xarray::Entry::Vacant(e) => e.insert(
                 self.hw_data_guard
                     .page
                     .take()
                     .expect("Expected page to be available"),
-                Some(&mut self.hw_data_guard.preload),
+                self.sheaf.as_mut(),
             )?,
             xarray::Entry::Occupied(e) => e.into_mut(),
         };

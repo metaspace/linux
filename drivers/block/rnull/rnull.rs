@@ -85,7 +85,10 @@ use kernel::{
         OwnableRefCounted,
         Owned, //
     },
-    xarray, //
+    xarray::{
+        self,
+        XArraySheaf, //
+    }, //
 };
 use pin_init::PinInit;
 use util::*;
@@ -495,25 +498,20 @@ impl NullBlkDevice {
         Ok(disk)
     }
 
+    fn sheaf_size() -> usize {
+        2 * ((usize::BITS as usize / bindings::XA_CHUNK_SHIFT)
+            + if (usize::BITS as usize % bindings::XA_CHUNK_SHIFT) == 0 {
+                0
+            } else {
+                1
+            })
+    }
+
     fn preload<'b, 'c>(
         tree_guard: &'b mut SpinLockGuard<'c, Pin<KBox<TreeContainer>>>,
         hw_data_guard: &'b mut SpinLockGuard<'c, HwQueueContext>,
         block_size_bytes: u32,
     ) -> Result {
-        let free_count = hw_data_guard.preload.free_count();
-        if free_count > 0 {
-            let mut preload = tree_guard.do_unlocked(|| {
-                hw_data_guard.do_unlocked(|| -> Result<_> {
-                    let mut v = KVec::new();
-                    for _ in 0..free_count {
-                        v.push(xarray::XArrayPreloadNode::new(GFP_KERNEL)?, GFP_KERNEL)?
-                    }
-                    Ok(v)
-                })
-            })?;
-            hw_data_guard.preload.preload_with(&mut preload)?;
-        }
-
         if hw_data_guard.page.is_none() {
             hw_data_guard.page = Some(tree_guard.do_unlocked(|| {
                 hw_data_guard.do_unlocked(|| NullBlockPage::new(block_size_bytes))
@@ -532,10 +530,34 @@ impl NullBlkDevice {
         mut segment: Segment<'_>,
         bypass_cache: bool,
     ) -> Result {
+        let mut sheaf: Option<XArraySheaf<'_>> = None;
+
         while !segment.is_empty() {
             Self::preload(&mut tree_guard, &mut hw_data_guard, self.block_size_bytes)?;
 
-            let mut access = self.storage.access(&mut tree_guard, &mut hw_data_guard);
+            match &mut sheaf {
+                Some(sheaf) => {
+                    tree_guard.do_unlocked(|| {
+                        hw_data_guard.do_unlocked(|| sheaf.refill(GFP_KERNEL, Self::sheaf_size()))
+                    })?;
+                }
+                None => {
+                    sheaf.insert(
+                        kernel::xarray::xarray_kmem_cache()
+                            .sheaf(Self::sheaf_size(), GFP_NOWAIT)
+                            .or(tree_guard.do_unlocked(|| {
+                                hw_data_guard.do_unlocked(|| -> Result<_> {
+                                    kernel::xarray::xarray_kmem_cache()
+                                        .sheaf(Self::sheaf_size(), GFP_KERNEL)
+                                })
+                            }))?,
+                    );
+                }
+            }
+
+            let mut access = self
+                .storage
+                .access(&mut tree_guard, &mut hw_data_guard, sheaf);
 
             if bypass_cache {
                 if let Some(page) = access.get_cache_page(sector) {
@@ -553,7 +575,18 @@ impl NullBlkDevice {
                 self.block_size_bytes.try_into()?,
             ) as u64
                 >> block::SECTOR_SHIFT;
+
+            sheaf = access.sheaf;
         }
+
+        if let Some(sheaf) = sheaf {
+            tree_guard.do_unlocked(|| {
+                hw_data_guard.do_unlocked(|| {
+                    sheaf.return_refill(GFP_KERNEL);
+                })
+            });
+        }
+
         Ok(())
     }
 
@@ -565,7 +598,9 @@ impl NullBlkDevice {
         mut sector: u64,
         mut segment: Segment<'_>,
     ) -> Result {
-        let access = self.storage.access(&mut tree_guard, &mut hw_data_guard);
+        let access = self
+            .storage
+            .access(&mut tree_guard, &mut hw_data_guard, None);
 
         while !segment.is_empty() {
             let page = access.get_read_page(sector);
@@ -865,7 +900,6 @@ impl HrTimerCallback for NullBlkDevice {
 
 struct HwQueueContext {
     page: Option<KBox<disk_storage::NullBlockPage>>,
-    preload: xarray::XArrayPreloadBuffer,
     poll_queue: kernel::ringbuffer::RingBuffer<Owned<mq::Request<NullBlkDevice>>>,
 }
 
@@ -978,7 +1012,6 @@ impl Operations for NullBlkDevice {
         KBox::pin_init(
             new_spinlock!(HwQueueContext {
                 page: None,
-                preload: xarray::XArrayPreloadBuffer::new(2)?,
                 poll_queue: kernel::ringbuffer::RingBuffer::new(
                     tagset_data.queue_depth.try_into()?
                 )?,
