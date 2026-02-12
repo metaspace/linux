@@ -1,19 +1,40 @@
 // SPDX-License-Identifier: GPL-2.0
 
-use super::{NullBlkDevice, THIS_MODULE};
+use super::{
+    NullBlkDevice,
+    THIS_MODULE, //
+};
 use kernel::{
-    block::mq::gen_disk::{GenDisk, GenDiskBuilder},
+    block::mq::gen_disk::{
+        GenDisk,
+        GenDiskBuilder, //
+    },
     c_str,
-    configfs::{self, AttributeOperations},
+    configfs::{
+        self,
+        AttributeOperations, //
+    },
     configfs_attrs,
-    fmt::{self, Write as _},
+    fmt::{
+        self,
+        Write as _, //
+    },
     new_mutex,
     page::PAGE_SIZE,
     prelude::*,
-    str::{kstrtobool_bytes, CString},
-    sync::Mutex,
+    str::{
+        kstrtobool_bytes,
+        CString, //
+    },
+    sync::Mutex, //
+};
+use macros::{
+    configfs_simple_bool_field,
+    configfs_simple_field, //
 };
 use pin_init::PinInit;
+
+mod macros;
 
 pub(crate) fn subsystem() -> impl PinInit<kernel::configfs::Subsystem<Config>, Error> {
     let item_type = configfs_attrs! {
@@ -166,99 +187,16 @@ impl configfs::AttributeOperations<0> for DeviceConfig {
     }
 }
 
-#[vtable]
-impl configfs::AttributeOperations<1> for DeviceConfig {
-    type Data = DeviceConfig;
+configfs_simple_field!(DeviceConfig, 1, block_size, u32, check GenDiskBuilder::validate_block_size);
+configfs_simple_bool_field!(DeviceConfig, 2, rotational);
+configfs_simple_field!(DeviceConfig, 3, capacity_mib, u64);
+configfs_simple_field!(DeviceConfig, 4, irq_mode, IRQMode);
 
-    fn show(this: &DeviceConfig, page: &mut [u8; PAGE_SIZE]) -> Result<usize> {
-        let mut writer = kernel::str::Formatter::new(page);
-        writer.write_fmt(fmt!("{}\n", this.data.lock().block_size))?;
-        Ok(writer.bytes_written())
-    }
+impl core::str::FromStr for IRQMode {
+    type Err = Error;
 
-    fn store(this: &DeviceConfig, page: &[u8]) -> Result {
-        if this.data.lock().powered {
-            return Err(EBUSY);
-        }
-
-        let text = core::str::from_utf8(page)?.trim();
-        let value = text.parse::<u32>().map_err(|_| EINVAL)?;
-
-        GenDiskBuilder::validate_block_size(value)?;
-        this.data.lock().block_size = value;
-        Ok(())
-    }
-}
-
-#[vtable]
-impl configfs::AttributeOperations<2> for DeviceConfig {
-    type Data = DeviceConfig;
-
-    fn show(this: &DeviceConfig, page: &mut [u8; PAGE_SIZE]) -> Result<usize> {
-        let mut writer = kernel::str::Formatter::new(page);
-
-        if this.data.lock().rotational {
-            writer.write_str("1\n")?;
-        } else {
-            writer.write_str("0\n")?;
-        }
-
-        Ok(writer.bytes_written())
-    }
-
-    fn store(this: &DeviceConfig, page: &[u8]) -> Result {
-        if this.data.lock().powered {
-            return Err(EBUSY);
-        }
-
-        this.data.lock().rotational = kstrtobool_bytes(page)?;
-
-        Ok(())
-    }
-}
-
-#[vtable]
-impl configfs::AttributeOperations<3> for DeviceConfig {
-    type Data = DeviceConfig;
-
-    fn show(this: &DeviceConfig, page: &mut [u8; PAGE_SIZE]) -> Result<usize> {
-        let mut writer = kernel::str::Formatter::new(page);
-        writer.write_fmt(fmt!("{}\n", this.data.lock().capacity_mib))?;
-        Ok(writer.bytes_written())
-    }
-
-    fn store(this: &DeviceConfig, page: &[u8]) -> Result {
-        if this.data.lock().powered {
-            return Err(EBUSY);
-        }
-
-        let text = core::str::from_utf8(page)?.trim();
-        let value = text.parse::<u64>().map_err(|_| EINVAL)?;
-
-        this.data.lock().capacity_mib = value;
-        Ok(())
-    }
-}
-
-#[vtable]
-impl configfs::AttributeOperations<4> for DeviceConfig {
-    type Data = DeviceConfig;
-
-    fn show(this: &DeviceConfig, page: &mut [u8; PAGE_SIZE]) -> Result<usize> {
-        let mut writer = kernel::str::Formatter::new(page);
-        writer.write_fmt(fmt!("{}\n", this.data.lock().irq_mode))?;
-        Ok(writer.bytes_written())
-    }
-
-    fn store(this: &DeviceConfig, page: &[u8]) -> Result {
-        if this.data.lock().powered {
-            return Err(EBUSY);
-        }
-
-        let text = core::str::from_utf8(page)?.trim();
-        let value = text.parse::<u8>().map_err(|_| EINVAL)?;
-
-        this.data.lock().irq_mode = IRQMode::try_from(value)?;
-        Ok(())
+    fn from_str(s: &str) -> Result<Self> {
+        let value: u8 = s.parse().map_err(|_| EINVAL)?;
+        value.try_into()
     }
 }
