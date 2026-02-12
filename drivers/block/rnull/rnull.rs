@@ -21,12 +21,17 @@ use kernel::{
         },
     },
     error::Result,
-    new_mutex, new_xarray,
+    new_mutex,
+    new_xarray,
     page::SafePage,
     pr_info,
     prelude::*,
     str::CString,
-    sync::{aref::ARef, Arc, Mutex},
+    sync::{
+        aref::ARef,
+        Arc,
+        Mutex, //
+    },
     time::{
         hrtimer::{
             HrTimerCallback,
@@ -40,7 +45,7 @@ use kernel::{
         OwnableRefCounted,
         Owned, //
     },
-    xarray::XArray,
+    xarray::XArray, //
 };
 use pin_init::PinInit;
 
@@ -73,8 +78,9 @@ module! {
             description:  "IRQ completion handler. 0-none, 1-softirq, 2-timer",
         },
         completion_nsec: u64 {
-            default: 10_000,
-            description:  "Time in ns to complete a request in hardware. Default: 10,000ns",
+                default: 10_000,
+                description:
+            "Time in ns to complete a request in hardware. Default: 10,000ns",
         },
         memory_backed: u8 {
             default: 0,
@@ -83,6 +89,11 @@ module! {
         submit_queues: u32 {
             default: 1,
             description: "Number of submission queues",
+        },
+        use_per_node_hctx: u8 {
+            default: 0,
+            description:
+        "Use per-node allocation for hardware context queues, 0-false, 1-true. Default: 0-false",
         },
     },
 }
@@ -106,6 +117,11 @@ impl kernel::InPlaceModule for NullBlkModule {
             for i in 0..(*module_parameters::nr_devices.value()) {
                 let name = CString::try_from_fmt(fmt!("rnullb{}", i))?;
 
+                let submit_queues = if *module_parameters::use_per_node_hctx.value() != 0 {
+                    kernel::num_online_nodes()
+                } else {
+                    *module_parameters::submit_queues.value()
+                };
                 let disk = NullBlkDevice::new(NullBlkOptions {
                     name: &name,
                     block_size: *module_parameters::bs.value(),
@@ -114,7 +130,7 @@ impl kernel::InPlaceModule for NullBlkModule {
                     irq_mode: (*module_parameters::irqmode.value()).try_into()?,
                     completion_time: Delta::from_nanos(completion_time),
                     memory_backed: *module_parameters::memory_backed.value() != 0,
-                    submit_queues: *module_parameters::submit_queues.value(),
+                    submit_queues,
                 })?;
                 disks.push(disk, GFP_KERNEL)?;
             }
