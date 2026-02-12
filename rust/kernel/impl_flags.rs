@@ -255,6 +255,12 @@ macro_rules! impl_flags {
             pub fn contains_all(self, flags: $flags) -> bool {
                 (self.0 & flags.0) == flags.0
             }
+
+            /// Return a copy of the inner representation of the flags.
+            #[inline]
+            pub fn into_inner(self) -> $ty {
+                self.0
+            }
         }
     };
 }
