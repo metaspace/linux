@@ -19,5 +19,9 @@ impl_flags! {
         /// Select 'none' during queue registration in case of a single hwq or shared
         /// hwqs instead of 'mq-deadline'.
         NoDefaultScheduler = bindings::BLK_MQ_F_NO_SCHED_BY_DEFAULT,
+
+        /// Use shared tag bitmap for all submission queues.
+        TagHctxShared = bindings::BLK_MQ_F_TAG_HCTX_SHARED,
+
     }
 }
