@@ -8,6 +8,7 @@ use crate::{
     bindings,
     block::mq::{operations::OperationsVTable, request::RequestDataWrapper, Operations},
     error::{self, Result},
+    prelude::*,
     try_pin_init,
     types::{ForeignOwnable, Opaque},
 };
@@ -34,7 +35,7 @@ pub struct TagSet<T: Operations> {
 }
 
 impl<T: Operations> TagSet<T> {
-    /// Try to create a new tag set
+    /// Try to create a new tag se }t
     pub fn new(
         nr_hw_queues: u32,
         tagset_data: T::TagSetData,
@@ -140,6 +141,20 @@ impl<T: Operations> TagSet<T> {
     pub fn hw_queue_count(&self) -> u32 {
         // SAFETY: By type invariant, `self.inner` is valid.
         unsafe { (*self.inner.get()).nr_hw_queues }
+    }
+
+    /// Update the number of hardware queues for this tag set.
+    ///
+    /// This operation may fail if memory for tags cannot be allocated.
+    pub fn update_hw_queue_count(&self, nr_hw_queues: u32) -> Result {
+        // SAFETY: blk_mq_update_nr_hw_queues applies internal synchronization.
+        unsafe { bindings::blk_mq_update_nr_hw_queues(self.inner.get(), nr_hw_queues) }
+
+        if self.hw_queue_count() == nr_hw_queues {
+            Ok(())
+        } else {
+            Err(ENOMEM)
+        }
     }
 
     /// Borrow the [`T::TagSetData`] associated with this tag set.
