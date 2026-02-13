@@ -139,16 +139,16 @@ impl<T: Operations> Request<T> {
 
     /// Get the target sector for the request.
     #[inline(always)]
-    pub fn sector(&self) -> usize {
+    pub fn sector(&self) -> u64 {
         // SAFETY: By type invariant of `Self`, `self.0` is valid and live.
-        unsafe { (*self.0.get()).__sector as usize }
+        unsafe { (*self.0.get()).__sector }
     }
 
     /// Get the size of the request in number of sectors.
     #[inline(always)]
-    pub fn sectors(&self) -> usize {
+    pub fn sectors(&self) -> u32 {
         // SAFETY: By type invariant of `Self`, `self.0` is valid and live.
-        (unsafe { (*self.0.get()).__data_len as usize }) >> crate::block::SECTOR_SHIFT
+        (unsafe { (*self.0.get()).__data_len }) >> crate::block::SECTOR_SHIFT
     }
 
     /// Return a pointer to the [`RequestDataWrapper`] stored in the private area

@@ -225,7 +225,7 @@ impl NullBlkDevice {
                 irq_mode,
                 completion_time,
                 memory_backed,
-                block_size: block_size as usize,
+                block_size: block_size.into(),
             }),
             GFP_KERNEL,
         )?;
@@ -246,54 +246,55 @@ impl NullBlkDevice {
     }
 
     #[inline(always)]
-    fn write(tree: &Tree, mut sector: usize, mut segment: Segment<'_>) -> Result {
+    fn write(tree: &Tree, mut sector: u64, mut segment: Segment<'_>) -> Result {
         while !segment.is_empty() {
             let page = NullBlockPage::new()?;
             let mut tree = tree.lock();
 
             let page_idx = sector >> block::PAGE_SECTORS_SHIFT;
 
-            let page = if let Some(page) = tree.get_mut(page_idx) {
+            let page = if let Some(page) = tree.get_mut(page_idx as usize) {
                 page
             } else {
-                tree.store(page_idx, page, GFP_NOIO)?;
-                tree.get_mut(page_idx).unwrap()
+                tree.store(page_idx as usize, page, GFP_NOIO)?;
+                tree.get_mut(page_idx as usize).unwrap()
             };
 
             page.set_occupied(sector);
-            let page_offset = (sector & block::SECTOR_MASK as usize) << block::SECTOR_SHIFT;
-            sector +=
-                segment.copy_to_page(page.page.get_pin_mut(), page_offset) >> block::SECTOR_SHIFT;
+            let page_offset = (sector & u64::from(block::SECTOR_MASK)) << block::SECTOR_SHIFT;
+            sector += segment.copy_to_page(page.page.get_pin_mut(), page_offset as usize) as u64
+                >> block::SECTOR_SHIFT;
         }
         Ok(())
     }
 
     #[inline(always)]
-    fn read(tree: &Tree, mut sector: usize, mut segment: Segment<'_>) -> Result {
+    fn read(tree: &Tree, mut sector: u64, mut segment: Segment<'_>) -> Result {
         let tree = tree.lock();
 
         while !segment.is_empty() {
             let idx = sector >> block::PAGE_SECTORS_SHIFT;
 
-            if let Some(page) = tree.get(idx) {
-                let page_offset = (sector & block::SECTOR_MASK as usize) << block::SECTOR_SHIFT;
-                sector += segment.copy_from_page(&page.page, page_offset) >> block::SECTOR_SHIFT;
+            if let Some(page) = tree.get(idx as usize) {
+                let page_offset = (sector & u64::from(block::SECTOR_MASK)) << block::SECTOR_SHIFT;
+                sector += segment.copy_from_page(&page.page, page_offset as usize) as u64
+                    >> block::SECTOR_SHIFT;
             } else {
-                sector += segment.zero_page() >> block::SECTOR_SHIFT;
+                sector += segment.zero_page() as u64 >> block::SECTOR_SHIFT;
             }
         }
 
         Ok(())
     }
 
-    fn discard(tree: &Tree, mut sector: usize, sectors: usize, block_size: usize) -> Result {
+    fn discard(tree: &Tree, mut sector: u64, sectors: u64, block_size: u64) -> Result {
         let mut remaining_bytes = sectors << SECTOR_SHIFT;
         let mut tree = tree.lock();
 
         while remaining_bytes > 0 {
             let page_idx = sector >> block::PAGE_SECTORS_SHIFT;
             let mut remove = false;
-            if let Some(page) = tree.get_mut(page_idx) {
+            if let Some(page) = tree.get_mut(page_idx as usize) {
                 page.set_free(sector);
                 if page.is_empty() {
                     remove = true;
@@ -301,7 +302,7 @@ impl NullBlkDevice {
             }
 
             if remove {
-                drop(tree.remove(page_idx))
+                drop(tree.remove(page_idx as usize))
             }
 
             let processed = remaining_bytes.min(block_size);
@@ -316,7 +317,7 @@ impl NullBlkDevice {
     fn transfer(
         command: bindings::req_op,
         tree: &Tree,
-        sector: usize,
+        sector: u64,
         segment: Segment<'_>,
     ) -> Result {
         match command {
@@ -346,13 +347,13 @@ impl NullBlockPage {
         )?)
     }
 
-    fn set_occupied(&mut self, sector: usize) {
-        let idx = sector & SECTOR_MASK as usize;
+    fn set_occupied(&mut self, sector: u64) {
+        let idx = sector & u64::from(SECTOR_MASK);
         self.status |= 1 << idx;
     }
 
-    fn set_free(&mut self, sector: usize) {
-        let idx = sector & SECTOR_MASK as usize;
+    fn set_free(&mut self, sector: u64) {
+        let idx = sector & u64::from(SECTOR_MASK);
         self.status &= !(1 << idx);
     }
 
@@ -371,7 +372,7 @@ struct QueueData {
     irq_mode: IRQMode,
     completion_time: Delta,
     memory_backed: bool,
-    block_size: usize,
+    block_size: u64,
 }
 
 #[pin_data]
@@ -422,14 +423,14 @@ impl Operations for NullBlkDevice {
             let mut sector = rq.sector();
 
             if command == bindings::req_op_REQ_OP_DISCARD {
-                Self::discard(tree, sector, rq.sectors(), queue_data.block_size)?;
+                Self::discard(tree, sector, rq.sectors().into(), queue_data.block_size)?;
             } else {
                 for bio in rq.bio_iter_mut() {
                     let segment_iter = bio.segment_iter();
                     for segment in segment_iter {
                         let length = segment.len();
                         Self::transfer(command, tree, sector, segment)?;
-                        sector += length as usize >> block::SECTOR_SHIFT;
+                        sector += u64::from(length) >> block::SECTOR_SHIFT;
                     }
                 }
             }
