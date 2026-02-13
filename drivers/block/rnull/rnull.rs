@@ -193,6 +193,10 @@ module! {
             default: 0,
             description: "Number of IOPOLL submission queues.",
         },
+        fua: u8 {
+            default: 1,
+            description: "Enable/disable FUA support when cache_size is used. Default: 1 (true)",
+        },
     },
 }
 
@@ -250,6 +254,7 @@ impl kernel::InPlaceModule for NullBlkModule {
                     zone_max_active: *module_parameters::zone_max_active.value(),
                     zone_append_max_sectors: *module_parameters::zone_append_max_sectors.value(),
                     poll_queues: *module_parameters::poll_queues.value(),
+                    forced_unit_access: *module_parameters::fua.value() != 0,
                 })?;
                 disks.push(disk, GFP_KERNEL)?;
             }
@@ -298,6 +303,7 @@ struct NullBlkOptions<'a> {
     #[cfg_attr(not(CONFIG_BLK_DEV_ZONED), expect(unused_variables))]
     zone_append_max_sectors: u32,
     poll_queues: u32,
+    forced_unit_access: bool,
 }
 
 static SHARED_TAG_SET: SetOnce<Arc<TagSet<NullBlkDevice>>> = SetOnce::new();
@@ -356,13 +362,11 @@ impl NullBlkDevice {
             zone_max_active,
             zone_append_max_sectors,
             poll_queues,
+            forced_unit_access,
         } = options;
 
         let mut flags = mq::tag_set::Flags::default();
 
-        // TODO: lim.features |= BLK_FEAT_WRITE_CACHE;
-        // if (dev->fua)
-        // 	lim.features |= BLK_FEAT_FUA;
         if blocking || memory_backed {
             flags |= mq::tag_set::Flag::Blocking;
         }
@@ -404,9 +408,10 @@ impl NullBlkDevice {
 
         let device_capacity_sectors = mib_to_sectors(device_capacity_mib);
 
+        let s = storage.clone();
         let queue_data = Arc::try_pin_init(
             try_pin_init!(Self {
-                storage,
+                storage: s,
                 irq_mode,
                 completion_time,
                 memory_backed,
@@ -439,7 +444,9 @@ impl NullBlkDevice {
             .capacity_sectors(device_capacity_sectors)
             .logical_block_size(block_size_bytes)?
             .physical_block_size(block_size_bytes)?
-            .rotational(rotational);
+            .rotational(rotational)
+            .write_cache(storage.cache_enabled())
+            .forced_unit_access(forced_unit_access && storage.cache_enabled());
 
         #[cfg(CONFIG_BLK_DEV_ZONED)]
         {
@@ -496,6 +503,7 @@ impl NullBlkDevice {
         hw_data_guard: &'b mut SpinLockGuard<'c, HwQueueContext>,
         mut sector: u64,
         mut segment: Segment<'_>,
+        bypass_cache: bool,
     ) -> Result {
         let mut sheaf: Option<XArraySheaf<'_>> = None;
 
@@ -524,12 +532,21 @@ impl NullBlkDevice {
 
             let mut access = self.storage.access(tree_guard, hw_data_guard, sheaf);
 
-            let page = access.get_write_page(sector)?;
+            if bypass_cache {
+                if let Some(page) = access.get_cache_page(sector) {
+                    page.set_free(sector);
+                }
+            }
+
+            let page = access.get_write_page(sector, bypass_cache)?;
             page.set_occupied(sector);
             let page_offset = (sector & u64::from(block::SECTOR_MASK)) << block::SECTOR_SHIFT;
 
-            sector += segment.copy_to_page(page.page_mut().get_pin_mut(), page_offset as usize)
-                as u64
+            sector += segment.copy_to_page_limit(
+                page.page_mut().get_pin_mut(),
+                page_offset as usize,
+                self.block_size_bytes.try_into()?,
+            ) as u64
                 >> block::SECTOR_SHIFT;
 
             sheaf = access.sheaf;
@@ -588,6 +605,8 @@ impl NullBlkDevice {
         let mut hw_data_guard = hw_data.lock();
         let mut tree_guard = self.storage.lock();
 
+        let skip_cache = rq.flags().contains(mq::RequestFlag::ForcedUnitAccess);
+
         for bio in rq.bio_iter_mut() {
             let segment_iter = bio.segment_iter();
             for segment in segment_iter {
@@ -596,9 +615,13 @@ impl NullBlkDevice {
                     .len()
                     .min((end_sector - sector) as u32 >> SECTOR_SHIFT);
                 match command {
-                    mq::Command::Write => {
-                        self.write(&mut tree_guard, &mut hw_data_guard, sector, segment)?
-                    }
+                    mq::Command::Write => self.write(
+                        &mut tree_guard,
+                        &mut hw_data_guard,
+                        sector,
+                        segment,
+                        skip_cache,
+                    )?,
                     mq::Command::Read => {
                         self.read(&mut tree_guard, &mut hw_data_guard, sector, segment)?
                     }
