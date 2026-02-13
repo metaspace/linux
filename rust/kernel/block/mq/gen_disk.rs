@@ -218,6 +218,10 @@ pub struct GenDisk<T: Operations> {
 // `TagSet` It is safe to send this to other threads as long as T is Send.
 unsafe impl<T: Operations + Send> Send for GenDisk<T> {}
 
+// SAFETY: `GenDisk` is an owned pointer to a `struct gendisk` and an `Arc` to a `TagSet`. It is
+// safe to reference these from multiple threads.
+unsafe impl<T: Operations> Sync for GenDisk<T> {}
+
 impl<T: Operations> Drop for GenDisk<T> {
     fn drop(&mut self) {
         // SAFETY: By type invariant of `Self`, `self.gendisk` points to a valid
