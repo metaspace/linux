@@ -6,13 +6,13 @@
 
 use crate::{
     bindings,
-    block::mq::{request::RequestDataWrapper, Request},
+    block::mq::{request::RequestDataWrapper, IdleRequest, Request},
     error::{from_result, Result},
     prelude::*,
     sync::{aref::ARef, atomic::ordering, Refcount},
     types::{ForeignOwnable, Owned},
 };
-use core::{marker::PhantomData, ptr::NonNull};
+use core::marker::PhantomData;
 use pin_init::PinInit;
 
 type ForeignBorrowed<'a, T> = <T as ForeignOwnable>::Borrowed<'a>;
@@ -60,7 +60,7 @@ pub trait Operations: Sized {
     fn queue_rq(
         hw_data: ForeignBorrowed<'_, Self::HwData>,
         queue_data: ForeignBorrowed<'_, Self::QueueData>,
-        rq: Owned<Request<Self>>,
+        rq: Owned<IdleRequest<Self>>,
         is_last: bool,
     ) -> Result;
 
@@ -132,14 +132,14 @@ impl<T: Operations> OperationsVTable<T> {
                 == 0
         );
 
+        // INVARIANT: By C API contract, `bd.rq` has not been started yet.
         // SAFETY:
         //  - By API contract, we own the request.
         //  - By the safety requirements of this function, `request` is a valid
         //    `struct request` and the private data is properly initialized.
         //  - `rq` will be alive until `blk_mq_end_request` is called and is
         //    reference counted by until then.
-        let mut rq =
-            unsafe { Owned::from_raw(NonNull::<Request<T>>::new_unchecked((*bd).rq.cast())) };
+        let rq = unsafe { IdleRequest::from_raw((*bd).rq) };
 
         // SAFETY: The safety requirement for this function ensure that `hctx`
         // is valid and that `driver_data` was produced by a call to
@@ -154,9 +154,6 @@ impl<T: Operations> OperationsVTable<T> {
         // `ForeignOwnable::from_foreign` is only called when the tagset is
         // dropped, which happens after we are dropped.
         let queue_data = unsafe { T::QueueData::borrow(queue_data) };
-
-        // SAFETY: We have exclusive access and we just set the refcount above.
-        unsafe { rq.start_unchecked() };
 
         let ret = T::queue_rq(
             hw_data,

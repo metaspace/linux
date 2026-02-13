@@ -575,9 +575,10 @@ impl Operations for NullBlkDevice {
     fn queue_rq(
         hw_data: Pin<&SpinLock<HwQueueContext>>,
         this: Pin<&Self>,
-        mut rq: Owned<mq::Request<Self>>,
+        rq: Owned<mq::IdleRequest<Self>>,
         _is_last: bool,
     ) -> Result {
+        let mut rq = rq.start();
         let mut sectors = rq.sectors();
 
         Self::handle_bad_blocks(this.get_ref(), &mut rq, &mut sectors)?;

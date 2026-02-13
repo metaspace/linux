@@ -15,12 +15,110 @@ use crate::{
     time::hrtimer::{
         HasHrTimer, HrTimer, HrTimerCallback, HrTimerHandle, HrTimerMode, HrTimerPointer,
     },
-    types::{Opaque, Ownable, OwnableRefCounted, Owned},
+    types::{ForeignOwnable, Opaque, Ownable, OwnableRefCounted, Owned},
 };
-use core::{ffi::c_void, marker::PhantomData, ptr::NonNull};
+use core::{ffi::c_void, marker::PhantomData, ops::Deref, ptr::NonNull};
 
 use crate::block::bio::Bio;
 use crate::block::bio::BioIterator;
+
+/// A [`Request`] that a driver has not yet begun to process.
+///
+/// A driver can convert an `IdleRequest` to a [`Request`] by calling [`IdleRequest::start`].
+///
+/// # Invariants
+///
+/// - This request has not been started yet.
+#[repr(transparent)]
+pub struct IdleRequest<T>(RequestInner<T>);
+
+impl<T: Operations> IdleRequest<T> {
+    /// Mark the request as processing.
+    ///
+    /// This converts the [`IdleRequest`] into a [`Request`].
+    pub fn start(self: Owned<Self>) -> Owned<Request<T>> {
+        // SAFETY: By type invariant `self.0.0` is a valid request. Because we have an `Owned<_>`,
+        // the refcount is zero.
+        let mut request = unsafe { Request::from_raw(self.0 .0.get()) };
+
+        debug_assert!(
+            request
+                .wrapper_ref()
+                .refcount()
+                .as_atomic()
+                .load(ordering::Acquire)
+                == 0
+        );
+
+        // SAFETY: We have exclusive access and the refcount is 0. By type invariant `request` was
+        // not started yet.
+        unsafe { request.start_unchecked() };
+
+        request
+    }
+
+    /// Create a [`Self`] from a raw request pointer.
+    ///
+    /// # Safety
+    ///
+    /// - The request pointed to by `ptr` must satisfythe invariants of both [`Request`] and
+    ///   [`Self`].
+    /// - The refcount of the request pointed to by `ptr` must be 0.
+    pub(crate) unsafe fn from_raw(ptr: *mut bindings::request) -> Owned<Self> {
+        // SAFETY: By function safety requirements, `ptr` is valid for use as an `IdleRequest`.
+        unsafe { Owned::from_raw(NonNull::<Self>::new_unchecked(ptr.cast())) }
+    }
+}
+
+// SAFETY: The `release` implementation leaks the `IdleRequest`, which is a valid state for a
+// [`Request`] with refcount 0.
+unsafe impl<T: Operations> Ownable for IdleRequest<T> {
+    unsafe fn release(_this: NonNull<Self>) {}
+}
+
+impl<T: Operations> Deref for IdleRequest<T> {
+    type Target = RequestInner<T>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+pub struct RequestInner<T>(Opaque<bindings::request>, PhantomData<T>);
+
+impl<T: Operations> RequestInner<T> {
+    /// Get the command identifier for the request
+    pub fn command(&self) -> u32 {
+        // SAFETY: By C API contract and type invariant, `cmd_flags` is valid for read
+        unsafe { (*self.0.get()).cmd_flags & ((1 << bindings::REQ_OP_BITS) - 1) }
+    }
+
+    /// Get the target sector for the request.
+    #[inline(always)]
+    pub fn sector(&self) -> u64 {
+        // SAFETY: By type invariant of `Self`, `self.0` is valid and live.
+        unsafe { (*self.0.get()).__sector }
+    }
+
+    /// Get the size of the request in number of sectors.
+    #[inline(always)]
+    pub fn sectors(&self) -> u32 {
+        self.bytes() >> crate::block::SECTOR_SHIFT
+    }
+
+    /// Get the size of the request in bytes.
+    #[inline(always)]
+    pub fn bytes(&self) -> u32 {
+        // SAFETY: By type invariant of `Self`, `self.0` is valid and live.
+        unsafe { (*self.0.get()).__data_len }
+    }
+
+    /// Borrow the queue data from the request queue associated with this request.
+    pub fn queue_data(&self) -> <T::QueueData as ForeignOwnable>::Borrowed<'_> {
+        // SAFETY: By type invariants of `Request`, `self.0` is a valid request.
+        unsafe { T::QueueData::borrow((*(*self.0.get()).q).queuedata) }
+    }
+}
 
 /// A wrapper around a blk-mq [`struct request`]. This represents an IO request.
 ///
@@ -58,9 +156,28 @@ use crate::block::bio::BioIterator;
 /// [`struct request`]: srctree/include/linux/blk-mq.h
 ///
 #[repr(transparent)]
-pub struct Request<T>(Opaque<bindings::request>, PhantomData<T>);
+pub struct Request<T>(RequestInner<T>);
+
+impl<T: Operations> Deref for Request<T> {
+    type Target = RequestInner<T>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
 
 impl<T: Operations> Request<T> {
+    /// Create a `Owned<Request>` from a request pointer.
+    ///
+    /// # Safety
+    ///
+    /// - `ptr` must satisfy invariants of `Request`.
+    /// - The refcount of the request pointed to by `ptr` must be 0.
+    pub(crate) unsafe fn from_raw(ptr: *mut bindings::request) -> Owned<Self> {
+        // SAFETY: By function safety requirements, `ptr` is valid for use as `Owned<Request>`.
+        unsafe { Owned::from_raw(NonNull::<Self>::new_unchecked(ptr.cast())) }
+    }
+
     /// Create an [`ARef<Request>`] from a [`struct request`] pointer.
     ///
     /// # Safety
@@ -76,12 +193,6 @@ impl<T: Operations> Request<T> {
         // SAFETY: By the safety requirement of this function, we own a
         // reference count that we can pass to `ARef`.
         unsafe { ARef::from_raw(NonNull::new_unchecked(ptr.cast())) }
-    }
-
-    /// Get the command identifier for the request
-    pub fn command(&self) -> u32 {
-        // SAFETY: By C API contract and type invariant, `cmd_flags` is valid for read
-        unsafe { (*self.0.get()).cmd_flags & ((1 << bindings::REQ_OP_BITS) - 1) }
     }
 
     /// Complete the request by scheduling `Operations::complete` for
@@ -106,7 +217,7 @@ impl<T: Operations> Request<T> {
     pub fn bio(&self) -> Option<&Bio> {
         // SAFETY: By type invariant of `Self`, `self.0` is valid and the deref
         // is safe.
-        let ptr = unsafe { (*self.0.get()).bio };
+        let ptr = unsafe { (*self.0 .0.get()).bio };
         // SAFETY: By C API contract, if `bio` is not null it will have a
         // positive refcount at least for the duration of the lifetime of
         // `&self`.
@@ -118,7 +229,7 @@ impl<T: Operations> Request<T> {
     pub fn bio_mut(&mut self) -> Option<&mut Bio> {
         // SAFETY: By type invariant of `Self`, `self.0` is valid and the deref
         // is safe.
-        let ptr = unsafe { (*self.0.get()).bio };
+        let ptr = unsafe { (*self.0 .0.get()).bio };
         // SAFETY: By C API contract, if `bio` is not null it will have a
         // positive refcount at least for the duration of the lifetime of
         // `&self`.
@@ -132,23 +243,9 @@ impl<T: Operations> Request<T> {
         // `NonNull::new` will return `None` if the pointer is null.
         BioIterator {
             // SAFETY: By type invariant `self.0` is a valid `struct request`.
-            bio: NonNull::new(unsafe { (*self.0.get()).bio.cast() }),
+            bio: NonNull::new(unsafe { (*self.0 .0.get()).bio.cast() }),
             _p: PhantomData,
         }
-    }
-
-    /// Get the target sector for the request.
-    #[inline(always)]
-    pub fn sector(&self) -> u64 {
-        // SAFETY: By type invariant of `Self`, `self.0` is valid and live.
-        unsafe { (*self.0.get()).__sector }
-    }
-
-    /// Get the size of the request in number of sectors.
-    #[inline(always)]
-    pub fn sectors(&self) -> u32 {
-        // SAFETY: By type invariant of `Self`, `self.0` is valid and live.
-        (unsafe { (*self.0.get()).__data_len }) >> crate::block::SECTOR_SHIFT
     }
 
     /// Return a pointer to the [`RequestDataWrapper`] stored in the private area
@@ -289,10 +386,10 @@ impl<T: Operations> Owned<Request<T>> {
     /// `self.wrapper_ref().refcount() == 0`.
     ///
     /// This can only be called once in the request life cycle.
-    pub(crate) unsafe fn start_unchecked(&mut self) {
+    pub unsafe fn start_unchecked(&mut self) {
         // SAFETY: By type invariant, `self.0` is a valid `struct request` and
         // we have exclusive access.
-        unsafe { bindings::blk_mq_start_request(self.0.get()) };
+        unsafe { bindings::blk_mq_start_request(self.0 .0.get()) };
     }
 
     /// Notify the block layer that the request has been completed without errors.
@@ -302,7 +399,7 @@ impl<T: Operations> Owned<Request<T>> {
 
     /// Notify the block layer that the request has been completed.
     pub fn end(self, status: u8) {
-        let request_ptr = self.0.get().cast();
+        let request_ptr = self.0 .0.get().cast();
         core::mem::forget(self);
         // SAFETY: By type invariant, `this.0` was a valid `struct request`. The
         // existence of `self` guarantees that there are no `ARef`s pointing to
