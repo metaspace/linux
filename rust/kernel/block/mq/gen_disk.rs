@@ -246,6 +246,12 @@ impl<T: Operations> GenDisk<T> {
         // SAFETY: By type invariant, self is a valid gendisk.
         unsafe { RequestQueue::from_raw((*self.gendisk).queue) }
     }
+
+    /// Get the queue data associated with this [`GenDisk`].
+    pub fn queue_data(&self) -> <T::QueueData as ForeignOwnable>::Borrowed<'_> {
+        // SAFETY: By type invariant, self is a valid gendisk.
+        unsafe { T::QueueData::borrow((*(*self.gendisk).queue).queuedata) }
+    }
 }
 
 // SAFETY: `GenDisk` is an owned pointer to a `struct gendisk` and an `Arc` to a
