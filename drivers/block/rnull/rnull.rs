@@ -136,7 +136,7 @@ struct NullBlkModule {
     #[pin]
     configfs_subsystem: kernel::configfs::Subsystem<configfs::Config>,
     #[pin]
-    param_disks: Mutex<KVec<GenDisk<NullBlkDevice>>>,
+    param_disks: Mutex<KVec<Arc<GenDisk<NullBlkDevice>>>>,
 }
 
 impl kernel::InPlaceModule for NullBlkModule {
@@ -218,7 +218,7 @@ struct NullBlkDevice {
 }
 
 impl NullBlkDevice {
-    fn new(options: NullBlkOptions<'_>) -> Result<GenDisk<Self>> {
+    fn new(options: NullBlkOptions<'_>) -> Result<Arc<GenDisk<Self>>> {
         let NullBlkOptions {
             name,
             block_size,

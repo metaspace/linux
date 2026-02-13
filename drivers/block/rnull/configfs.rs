@@ -189,7 +189,7 @@ struct DeviceConfigInner {
     capacity_mib: u64,
     irq_mode: IRQMode,
     completion_time: time::Delta,
-    disk: Option<GenDisk<NullBlkDevice>>,
+    disk: Option<Arc<GenDisk<NullBlkDevice>>>,
     memory_backed: bool,
     submit_queues: u32,
     home_node: i32,

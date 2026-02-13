@@ -11,11 +11,13 @@ use crate::{
     error::{self, from_err_ptr, Result},
     fmt::{self, Write},
     prelude::*,
+    revocable::Revocable,
     static_lock_class,
     str::NullTerminatedFormatter,
-    sync::Arc,
+    sync::{Arc, UniqueArc},
     types::{ForeignOwnable, ScopeGuard},
 };
+use core::ptr::NonNull;
 
 /// A builder for [`GenDisk`].
 ///
@@ -112,7 +114,7 @@ impl GenDiskBuilder {
         name: fmt::Arguments<'_>,
         tagset: Arc<TagSet<T>>,
         queue_data: T::QueueData,
-    ) -> Result<GenDisk<T>> {
+    ) -> Result<Arc<GenDisk<T>>> {
         let data = queue_data.into_foreign();
         let recover_data = ScopeGuard::new(|| {
             // SAFETY: T::QueueData was created by the call to `into_foreign()` above
@@ -194,10 +196,28 @@ impl GenDiskBuilder {
         // INVARIANT: `gendisk` was added to the VFS via `device_add_disk` above.
         // INVARIANT: `gendisk.queue.queue_data` is set to `data` in the call to
         // `__blk_mq_alloc_disk` above.
-        Ok(GenDisk {
-            _tagset: tagset,
-            gendisk,
-        })
+        let mut disk = UniqueArc::new(
+            GenDisk {
+                _tagset: tagset,
+                gendisk,
+                backref: Arc::pin_init(
+                    // INVARIANT: We break `GenDiskRef` invariant here, but we restore it below.
+                    Revocable::new(GenDiskRef(NonNull::dangling())),
+                    GFP_KERNEL,
+                )?,
+            },
+            GFP_KERNEL,
+        )?;
+
+        disk.backref = Arc::pin_init(
+            // INVARIANT: The `GenDisk` in `disk` is a valid for use as a reference.
+            Revocable::new(GenDiskRef(
+                NonNull::new(disk.as_ptr().cast_mut()).expect("Should not be null"),
+            )),
+            GFP_KERNEL,
+        )?;
+
+        Ok(disk.into())
     }
 }
 
@@ -212,6 +232,14 @@ impl GenDiskBuilder {
 pub struct GenDisk<T: Operations> {
     _tagset: Arc<TagSet<T>>,
     gendisk: *mut bindings::gendisk,
+    backref: Arc<Revocable<GenDiskRef<T>>>,
+}
+
+impl<T: Operations> GenDisk<T> {
+    /// Get a `GenDiskRef` referencing this `GenDisk`.
+    pub fn get_ref(&self) -> Arc<Revocable<GenDiskRef<T>>> {
+        self.backref.clone()
+    }
 }
 
 // SAFETY: `GenDisk` is an owned pointer to a `struct gendisk` and an `Arc` to a
@@ -239,5 +267,27 @@ impl<T: Operations> Drop for GenDisk<T> {
         // a call to `ForeignOwnable::into_foreign` to create `queuedata`.
         // `ForeignOwnable::from_foreign` is only called here.
         drop(unsafe { T::QueueData::from_foreign(queue_data) });
+    }
+}
+
+/// A reference to a `GenDisk`.
+///
+/// # Invariants
+///
+/// `self.0` is valid for use as a reference.
+pub struct GenDiskRef<T: Operations>(NonNull<GenDisk<T>>);
+
+// SAFETY: It is safe to transfer ownership of `GenDiskRef` across thread boundaries.
+unsafe impl<T: Operations> Send for GenDiskRef<T> {}
+
+// SAFETY: It is safe to share references to `GenDiskRef` across thread boundaries.
+unsafe impl<T: Operations> Sync for GenDiskRef<T> {}
+
+impl<T: Operations> core::ops::Deref for GenDiskRef<T> {
+    type Target = GenDisk<T>;
+
+    fn deref(&self) -> &Self::Target {
+        // SAFETY: By type invariant, `self.0` is valid for use as a reference.
+        unsafe { self.0.as_ref() }
     }
 }
