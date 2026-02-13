@@ -7,7 +7,7 @@
 
 use crate::{
     bindings,
-    block::mq::{Operations, TagSet},
+    block::mq::{Operations, RequestQueue, TagSet},
     error::{self, from_err_ptr, Result},
     fmt::{self, Write},
     prelude::*,
@@ -239,6 +239,12 @@ impl<T: Operations> GenDisk<T> {
     /// Get a `GenDiskRef` referencing this `GenDisk`.
     pub fn get_ref(&self) -> Arc<Revocable<GenDiskRef<T>>> {
         self.backref.clone()
+    }
+
+    /// Get the [`RequestQueue`] associated with this [`GenDisk`].
+    pub fn queue(&self) -> &RequestQueue<T> {
+        // SAFETY: By type invariant, self is a valid gendisk.
+        unsafe { RequestQueue::from_raw((*self.gendisk).queue) }
     }
 }
 
