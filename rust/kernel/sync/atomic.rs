@@ -605,3 +605,35 @@ where
         unsafe { from_repr(ret) }
     }
 }
+
+/// Copy `len` bytes from `src` to `dst` using byte-wise atomic operations.
+///
+/// This copy operation is volatile.
+///
+/// # Safety
+///
+/// Callers must ensure that:
+///
+/// - `src` is valid for reads for `len` bytes for the duration of the call.
+/// - `dst` is valid for writes for `len` bytes for the duration of the call.
+/// - For the duration of the call, other accesses to the areas described by `src`, `dst` and `len`,
+///   must not cause data races (defined by [`LKMM`]) against atomic operations executed by this
+///   function. Note that if all other accesses are atomic, then this safety requirement is
+///   trivially fulfilled.
+///
+/// [`LKMM`]: srctree/tools/memory-model
+pub unsafe fn atomic_per_byte_memcpy(src: *const u8, dst: *mut u8, len: usize) {
+    // SAFETY: By the safety requirements of this function, the following operation will not:
+    //  - Trap.
+    //  - Invalidate any reference invariants.
+    //  - Race with any operation by the Rust AM, as `bindings::memcpy` is a byte-wise atomic
+    //    operation and all operations by the Rust AM to the involved memory areas use byte-wise
+    //    atomic semantics.
+    unsafe {
+        bindings::memcpy(
+            dst.cast::<kernel::ffi::c_void>(),
+            src.cast::<kernel::ffi::c_void>(),
+            len,
+        )
+    };
+}
