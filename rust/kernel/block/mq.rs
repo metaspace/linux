@@ -131,6 +131,7 @@ mod request_queue;
 pub mod tag_set;
 
 pub use operations::Operations;
+pub use request::Command;
 pub use request::IdleRequest;
 pub use request::Request;
 pub use request::RequestTimerHandle;
