@@ -7,6 +7,7 @@
 use crate::{
     bindings,
     block::mq::Operations,
+    prelude::*,
     sync::{
         aref::{ARef, RefCounted},
         atomic::ordering,
@@ -295,6 +296,13 @@ impl<T: Operations> Request<T> {
     /// Return a reference to the per-request data associated with this request.
     pub fn data_ref(&self) -> &T::RequestData {
         &self.wrapper_ref().data
+    }
+
+    /// Set the target sector for the request.
+    #[inline(always)]
+    pub fn set_sector(self: Pin<&mut Self>, sector: u64) {
+        // SAFETY: By type invariant of `Self`, `self.0` is valid and live.
+        unsafe { (*self.0 .0.get()).__sector = sector }
     }
 }
 
