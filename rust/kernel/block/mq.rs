@@ -64,7 +64,7 @@
 //! ```rust
 //! use kernel::{
 //!     bindings,
-//!     block::mq::{self, *},
+//!     block::{error::BlkResult, mq::{self, *}},
 //!     new_mutex,
 //!     prelude::*,
 //!     sync::{aref::ARef, Arc, Mutex},
@@ -90,7 +90,7 @@
 //!         _queue_data: (),
 //!         rq: Owned<IdleRequest<Self>>,
 //!         _is_last: bool
-//!     ) -> Result {
+//!     ) -> BlkResult {
 //!         rq.start().end_ok();
 //!         Ok(())
 //!     }

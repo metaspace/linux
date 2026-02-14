@@ -6,7 +6,10 @@
 
 use crate::{
     bindings,
-    block::mq::{request::RequestDataWrapper, IdleRequest, Request},
+    block::{
+        error::BlkResult,
+        mq::{request::RequestDataWrapper, IdleRequest, Request},
+    },
     error::{from_result, Result},
     prelude::*,
     sync::{aref::ARef, atomic::ordering, Refcount},
@@ -62,7 +65,7 @@ pub trait Operations: Sized {
         queue_data: ForeignBorrowed<'_, Self::QueueData>,
         rq: Owned<IdleRequest<Self>>,
         is_last: bool,
-    ) -> Result;
+    ) -> BlkResult;
 
     /// Called by the kernel to indicate that queued requests should be submitted.
     fn commit_rqs(
