@@ -136,4 +136,5 @@ pub use request::IdleRequest;
 pub use request::Request;
 pub use request::RequestTimerHandle;
 pub use request_queue::RequestQueue;
+pub use tag_set::QueueType;
 pub use tag_set::TagSet;

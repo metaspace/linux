@@ -102,8 +102,8 @@ pub trait Operations: Sized {
         Err(ENOTSUPP)
     }
 
-    /// Called by the kernel to map submission queues to CPU cores.
-    fn map_queues(_tag_set: &TagSet<Self>) {
+    /// Called by the kernel to map hardware queues to CPU cores.
+    fn map_queues(_tag_set: Pin<&mut TagSet<Self>>) {
         build_error!(crate::error::VTABLE_DEFAULT_ERROR)
     }
 }
@@ -408,9 +408,9 @@ impl<T: Operations> OperationsVTable<T> {
     /// must be a pointer to a valid and initialized `TagSet<T>`. The pointee
     /// must be valid for use as a reference at least the duration of this call.
     unsafe extern "C" fn map_queues_callback(tag_set: *mut bindings::blk_mq_tag_set) {
-        // SAFETY: The safety requirements of this function satiesfies the
-        // requirements of `TagSet::from_ptr`.
-        let tag_set = unsafe { TagSet::from_ptr(tag_set) };
+        // SAFETY: By C API contract `tag_set` is the tag set registered with the `GenDisk` created
+        // by `GenDiskBuilder`.
+        let tag_set = unsafe { TagSet::from_ptr_mut(tag_set) };
         T::map_queues(tag_set);
     }
 
