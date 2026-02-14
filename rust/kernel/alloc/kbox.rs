@@ -323,7 +323,7 @@ where
     /// }
     ///
     /// // Allocate a boxed slice of 10 `Example`s.
-    /// let s = KBox::pin_slice(
+    /// let s = KBox::pin_slice::<_, _, Error, _>(
     ///     | _i | Example::new(),
     ///     10,
     ///     GFP_KERNEL
@@ -333,24 +333,31 @@ where
     /// assert_eq!(s[3].d.lock().a, 20);
     /// # Ok::<(), Error>(())
     /// ```
-    pub fn pin_slice<Func, Item, E>(
+    pub fn pin_slice<Func, Item, E, E2>(
         mut init: Func,
         len: usize,
         flags: Flags,
     ) -> Result<Pin<Box<[T], A>>, E>
     where
         Func: FnMut(usize) -> Item,
-        Item: PinInit<T, E>,
-        E: From<AllocError>,
+        Item: PinInit<T, E2>,
+        AllocError: Into<E>,
+        E2: Into<E>,
     {
-        let mut buffer = super::Vec::<T, A>::with_capacity(len, flags)?;
+        let mut buffer = match super::Vec::<T, A>::with_capacity(len, flags) {
+            Ok(buffer) => buffer,
+            Err(err) => return Err(err.into()),
+        };
         for i in 0..len {
             let ptr = buffer.spare_capacity_mut().as_mut_ptr().cast();
             // SAFETY:
             // - `ptr` is a valid pointer to uninitialized memory.
             // - `ptr` is not used if an error is returned.
             // - `ptr` won't be moved until it is dropped, i.e. it is pinned.
-            unsafe { init(i).__pinned_init(ptr)? };
+            match unsafe { init(i).__pinned_init(ptr) } {
+                Ok(()) => (),
+                Err(err) => return Err(err.into()),
+            }
 
             // SAFETY:
             // - `i + 1 <= len`, hence we don't exceed the capacity, due to the call to
