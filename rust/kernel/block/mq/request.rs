@@ -7,7 +7,6 @@
 use crate::{
     bindings,
     block::mq::Operations,
-    prelude::*,
     sync::{
         aref::{ARef, RefCounted},
         atomic::ordering,
@@ -18,7 +17,7 @@ use crate::{
     },
     types::{ForeignOwnable, Opaque, Ownable, OwnableRefCounted, Owned},
 };
-use core::{ffi::c_void, marker::PhantomData, ops::Deref, ptr::NonNull};
+use core::{ffi::c_void, marker::PhantomData, ops::Deref, pin::Pin, ptr::NonNull};
 
 use super::RequestQueue;
 use crate::block::bio::Bio;

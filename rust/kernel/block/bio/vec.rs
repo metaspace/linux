@@ -79,13 +79,38 @@ impl Segment<'_> {
     /// Returns the number of bytes copied.
     #[inline(always)]
     pub fn copy_to_page(&mut self, dst_page: Pin<&mut SafePage>, dst_offset: usize) -> usize {
+        self.copy_to_page_limit(dst_page, dst_offset, 0)
+    }
+
+    /// Copy data of this segment into `dst_page`.
+    ///
+    /// Copies at most `limit` bytes of data from the current offset to the next page boundary. That
+    /// is `PAGE_SIZE - (self.offeset() % PAGE_SIZE)` bytes of data. Data is placed at offset
+    /// `self.offset()` in the target page. This call will advance offset and reduce length of
+    /// `self`.
+    ///
+    /// If `limit` is zero it is ignored.
+    ///
+    /// Returns the number of bytes copied.
+    #[inline(always)]
+    pub fn copy_to_page_limit(
+        &mut self,
+        dst_page: Pin<&mut SafePage>,
+        dst_offset: usize,
+        limit: usize,
+    ) -> usize {
         // SAFETY: We are not moving out of `dst_page`.
         let dst_page = unsafe { Pin::into_inner_unchecked(dst_page) };
         let src_offset = self.offset() % PAGE_SIZE;
         debug_assert!(dst_offset <= PAGE_SIZE);
-        let length = (PAGE_SIZE - src_offset)
+        let mut length = (PAGE_SIZE - src_offset)
             .min(self.len() as usize)
             .min(PAGE_SIZE - dst_offset);
+
+        if limit > 0 {
+            length = length.min(limit);
+        }
+
         let page_idx = self.offset() / PAGE_SIZE;
 
         // SAFETY: self.bio_vec is valid and thus bv_page must be a valid
