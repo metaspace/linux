@@ -19,6 +19,7 @@ use crate::{
 };
 use core::{ffi::c_void, marker::PhantomData, ops::Deref, ptr::NonNull};
 
+use super::RequestQueue;
 use crate::block::bio::Bio;
 use crate::block::bio::BioIterator;
 
@@ -117,6 +118,12 @@ impl<T: Operations> RequestInner<T> {
     pub fn queue_data(&self) -> <T::QueueData as ForeignOwnable>::Borrowed<'_> {
         // SAFETY: By type invariants of `Request`, `self.0` is a valid request.
         unsafe { T::QueueData::borrow((*(*self.0.get()).q).queuedata) }
+    }
+
+    /// Get the request queue associated with this request.
+    pub fn queue(&self) -> &RequestQueue<T> {
+        // SAFETY: By type invariant, self.0 is guaranteed to be valid.
+        unsafe { RequestQueue::from_raw((*self.0.get()).q) }
     }
 }
 
