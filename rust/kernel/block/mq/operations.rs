@@ -65,6 +65,7 @@ pub trait Operations: Sized {
         queue_data: ForeignBorrowed<'_, Self::QueueData>,
         rq: Owned<IdleRequest<Self>>,
         is_last: bool,
+        is_poll: bool,
     ) -> BlkResult;
 
     /// Called by the kernel to indicate that queued requests should be submitted.
@@ -84,7 +85,15 @@ pub trait Operations: Sized {
 
     /// Called by the kernel to poll the device for completed requests. Only
     /// used for poll queues.
-    fn poll(_hw_data: ForeignBorrowed<'_, Self::HwData>) -> bool {
+    ///
+    /// Should return `Ok(true)` if any requests were completed during the call,
+    /// `Ok(false)` if no requests were completed, and `Err(e)` to signal an
+    /// error condition.
+    fn poll(
+        _hw_data: ForeignBorrowed<'_, Self::HwData>,
+        _queue_data: ForeignBorrowed<'_, Self::QueueData>,
+        _batch: &mut IoCompletionBatch<Self>,
+    ) -> Result<bool> {
         build_error!(crate::error::VTABLE_DEFAULT_ERROR)
     }
 
@@ -168,6 +177,11 @@ impl<T: Operations> OperationsVTable<T> {
         // `into_foreign` in `Self::init_hctx_callback`.
         let hw_data = unsafe { T::HwData::borrow((*hctx).driver_data) };
 
+        let is_poll = u32::from(
+            // SAFETY: `hctx` is valid as required by this function.
+            unsafe { (*hctx).type_ },
+        ) == bindings::hctx_type_HCTX_TYPE_POLL;
+
         // SAFETY: `hctx` is valid as required by this function.
         let queue_data = unsafe { (*(*hctx).queue).queuedata };
 
@@ -184,6 +198,7 @@ impl<T: Operations> OperationsVTable<T> {
             // SAFETY: `bd` is valid as required by the safety requirement for
             // this function.
             unsafe { (*bd).last },
+            is_poll,
         );
 
         if let Err(e) = ret {
@@ -242,13 +257,32 @@ impl<T: Operations> OperationsVTable<T> {
     /// previously initialized by a call to `init_hctx_callback`.
     unsafe extern "C" fn poll_callback(
         hctx: *mut bindings::blk_mq_hw_ctx,
-        _iob: *mut bindings::io_comp_batch,
+        iob: *mut bindings::io_comp_batch,
     ) -> crate::ffi::c_int {
         // SAFETY: By function safety requirement, `hctx` was initialized by
         // `init_hctx_callback` and thus `driver_data` came from a call to
         // `into_foreign`.
         let hw_data = unsafe { T::HwData::borrow((*hctx).driver_data) };
-        T::poll(hw_data).into()
+
+        // SAFETY: `hctx` is valid as required by this function.
+        let queue_data = unsafe { (*(*hctx).queue).queuedata };
+
+        // SAFETY: `queue.queuedata` was created by `GenDiskBuilder::build` with
+        // a call to `ForeignOwnable::into_foreign` to create `queuedata`.
+        // `ForeignOwnable::from_foreign` is only called when the tagset is
+        // dropped, which happens after we are dropped.
+        let queue_data = unsafe { T::QueueData::borrow(queue_data) };
+
+        let mut batch = IoCompletionBatch {
+            inner: iob,
+            _p: PhantomData,
+        };
+
+        let ret = T::poll(hw_data, queue_data, &mut batch);
+        match ret {
+            Ok(val) => val.into(),
+            Err(e) => e.to_errno(),
+        }
     }
 
     /// This function is called by the C kernel. A pointer to this function is
@@ -446,5 +480,69 @@ impl<T: Operations> OperationsVTable<T> {
 
     pub(crate) const fn build() -> &'static bindings::blk_mq_ops {
         &Self::VTABLE
+    }
+}
+
+/// A batch of I/O completions for polled I/O.
+///
+/// This struct wraps the C `struct io_comp_batch` and is used to batch
+/// multiple request completions together for improved efficiency during polled
+/// I/O operations.
+///
+/// When the kernel polls for completed requests via [`Operations::poll`], it
+/// passes an `IoCompletionBatch` to collect completed requests. The driver can
+/// add completed requests to the batch using [`add_request`], allowing the
+/// kernel to process multiple completions together rather than one at a time.
+///
+/// # Invariants
+///
+/// - `inner` must point to a valid `io_comp_batch`.
+///
+/// [`add_request`]: IoCompletionBatch::add_request
+#[repr(transparent)]
+pub struct IoCompletionBatch<T> {
+    inner: *mut bindings::io_comp_batch,
+    _p: PhantomData<T>,
+}
+
+impl<T: Operations> IoCompletionBatch<T> {
+    /// Attempt to add a completed request to this batch.
+    ///
+    /// This method tries to add `rq` to the batch for deferred completion. If
+    /// the request is successfully added, ownership is transferred to the batch
+    /// and the request will be completed later when the batch is processed.
+    ///
+    /// # Arguments
+    ///
+    /// - `rq`: The completed request to add to the batch.
+    /// - `error`: Set to `true` if the request completed with an error.
+    ///
+    /// # Return
+    ///
+    /// When this method returns `Err`, the caller is responsible for completing
+    /// the request through other means, such as calling
+    /// [`Request::complete`](super::Request::complete).
+    pub fn add_request(
+        &mut self,
+        rq: Owned<Request<T>>,
+        error: bool,
+    ) -> Result<(), Owned<Request<T>>> {
+        // SAFETY: By type invariant, `self.inner` is a valid `io_comp_batch`.
+        let ret = unsafe {
+            bindings::blk_mq_add_to_batch(
+                rq.as_raw(),
+                self.inner,
+                error,
+                Some(bindings::blk_mq_end_request_batch),
+            )
+        };
+
+        match ret {
+            true => {
+                core::mem::forget(rq);
+                Ok(())
+            }
+            false => Err(rq),
+        }
     }
 }

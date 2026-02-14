@@ -135,6 +135,11 @@ impl<T: Operations> RequestInner<T> {
         // SAFETY: By type invariant, self.0 is guaranteed to be valid.
         unsafe { RequestQueue::from_raw((*self.0.get()).q) }
     }
+
+    /// Return a raw pointer to the underlying C structure.
+    pub fn as_raw(&self) -> *mut bindings::request {
+        self.0.get()
+    }
 }
 
 /// A wrapper around a blk-mq [`struct request`]. This represents an IO request.
