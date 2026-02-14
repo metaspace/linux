@@ -19,11 +19,11 @@ const _CHEKC_STATUS_WIDTH: () = build_assert!((PAGE_SIZE >> SECTOR_SHIFT) <= 64)
 pub(crate) struct NullBlockPage {
     page: Owned<SafePage>,
     status: u64,
-    block_size: usize,
+    block_size: u32,
 }
 
 impl NullBlockPage {
-    pub(crate) fn new(block_size: usize) -> Result<KBox<Self>> {
+    pub(crate) fn new(block_size: u32) -> Result<KBox<Self>> {
         Ok(KBox::new(
             Self {
                 page: SafePage::alloc_page(GFP_NOIO | __GFP_ZERO)?,

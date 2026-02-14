@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 
 use super::HwQueueContext;
+use crate::util::*;
 use core::pin::Pin;
 use kernel::{
     block,
@@ -9,8 +10,12 @@ use kernel::{
     page::PAGE_SIZE,
     prelude::*,
     sync::{
-        atomic::{ordering, Atomic},
-        SpinLock, SpinLockGuard,
+        atomic::{
+            ordering,
+            Atomic, //
+        },
+        SpinLock,
+        SpinLockGuard, //
     },
     uapi::PAGE_SECTORS,
     xarray::{
@@ -31,11 +36,11 @@ pub(crate) struct DiskStorage {
     cache_size: u64,
     cache_size_used: Atomic<u64>,
     next_flush_sector: Atomic<u64>,
-    block_size: usize,
+    block_size: u32,
 }
 
 impl DiskStorage {
-    pub(crate) fn new(cache_size: u64, block_size: usize) -> impl PinInit<Self, Error> {
+    pub(crate) fn new(cache_size: u64, block_size: u32) -> impl PinInit<Self, Error> {
         try_pin_init!( Self {
             // TODO: Get rid of the box
             // https://git.kernel.org/pub/scm/linux/kernel/git/boqun/linux.git/commit/?h=locking&id=a5d84cafb3e253a11d2e078902c5b090be2f4227
@@ -58,6 +63,27 @@ impl DiskStorage {
 
     pub(crate) fn lock(&self) -> SpinLockGuard<'_, Pin<KBox<TreeContainer>>> {
         self.trees.lock()
+    }
+
+    pub(crate) fn discard(
+        &self,
+        hw_data: &Pin<&SpinLock<HwQueueContext>>,
+        mut sector: u64,
+        sectors: u32,
+    ) {
+        let mut tree_guard = self.lock();
+        let mut hw_data_guard = hw_data.lock();
+
+        let mut access = self.access(&mut tree_guard, &mut hw_data_guard, None);
+
+        let mut remaining_bytes = sectors_to_bytes(sectors);
+
+        while remaining_bytes > 0 {
+            access.free_sector(sector);
+            let processed = remaining_bytes.min(self.block_size);
+            sector += Into::<u64>::into(bytes_to_sectors(processed));
+            remaining_bytes -= processed;
+        }
     }
 }
 
