@@ -508,10 +508,10 @@ impl NullBlkDevice {
                     .len()
                     .min((end_sector - sector) as u32 >> SECTOR_SHIFT);
                 match command {
-                    bindings::req_op_REQ_OP_WRITE => {
+                    mq::Command::Write => {
                         self.write(&mut tree_guard, &mut hw_data_guard, sector, segment)?
                     }
-                    bindings::req_op_REQ_OP_READ => {
+                    mq::Command::Read => {
                         self.read(&mut tree_guard, &mut hw_data_guard, sector, segment)?
                     }
                     _ => (),
@@ -703,7 +703,7 @@ impl Operations for NullBlkDevice {
         Self::handle_bad_blocks(this.deref(), &mut rq, &mut sectors)?;
 
         if this.memory_backed {
-            if rq.command() == bindings::req_op_REQ_OP_DISCARD {
+            if rq.command() == mq::Command::Discard {
                 this.discard(&hw_data, rq.sector(), sectors)?;
             } else {
                 this.transfer(&hw_data, &mut rq, sectors)?;

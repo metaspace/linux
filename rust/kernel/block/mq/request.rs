@@ -23,6 +23,9 @@ use super::RequestQueue;
 use crate::block::bio::Bio;
 use crate::block::bio::BioIterator;
 
+mod command;
+pub use command::Command;
+
 /// A [`Request`] that a driver has not yet begun to process.
 ///
 /// A driver can convert an `IdleRequest` to a [`Request`] by calling [`IdleRequest::start`].
@@ -89,9 +92,15 @@ pub struct RequestInner<T>(Opaque<bindings::request>, PhantomData<T>);
 
 impl<T: Operations> RequestInner<T> {
     /// Get the command identifier for the request
-    pub fn command(&self) -> u32 {
+    fn command_raw(&self) -> u32 {
         // SAFETY: By C API contract and type invariant, `cmd_flags` is valid for read
         unsafe { (*self.0.get()).cmd_flags & ((1 << bindings::REQ_OP_BITS) - 1) }
+    }
+
+    /// Get the command of this request.
+    pub fn command(&self) -> Command {
+        // SAFETY: By type invariant of `Self`, `self.0` is valid and live.
+        unsafe { Command::from_raw(self.command_raw()) }
     }
 
     /// Get the target sector for the request.
