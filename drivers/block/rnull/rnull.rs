@@ -907,7 +907,6 @@ impl Operations for NullBlkDevice {
         this: ArcBorrow<'_, Self>,
         rq: Owned<mq::IdleRequest<Self>>,
         is_last: bool,
-        _is_poll: bool,
     ) -> BlkResult {
         Ok(Self::queue_rq_internal(hw_data, this, rq, is_last)?)
     }
