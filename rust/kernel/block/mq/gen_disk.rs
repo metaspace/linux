@@ -7,7 +7,7 @@
 
 use crate::{
     bindings,
-    block::mq::{Operations, RequestQueue, TagSet},
+    block::mq::{operations::OperationsVTable, Operations, RequestQueue, TagSet},
     error::{self, from_err_ptr, Result},
     fmt::{self, Write},
     prelude::*,
@@ -28,6 +28,12 @@ pub struct GenDiskBuilder<T> {
     physical_block_size: u32,
     capacity_sectors: u64,
     max_hw_discard_sectors: u32,
+    #[cfg(CONFIG_BLK_DEV_ZONED)]
+    zoned: bool,
+    #[cfg(CONFIG_BLK_DEV_ZONED)]
+    zone_size_sectors: u32,
+    #[cfg(CONFIG_BLK_DEV_ZONED)]
+    zone_append_max_sectors: u32,
     _p: PhantomData<T>,
 }
 
@@ -39,6 +45,12 @@ impl<T> Default for GenDiskBuilder<T> {
             physical_block_size: bindings::PAGE_SIZE as u32,
             capacity_sectors: 0,
             max_hw_discard_sectors: 0,
+            #[cfg(CONFIG_BLK_DEV_ZONED)]
+            zoned: false,
+            #[cfg(CONFIG_BLK_DEV_ZONED)]
+            zone_size_sectors: 0,
+            #[cfg(CONFIG_BLK_DEV_ZONED)]
+            zone_append_max_sectors: 0,
             _p: PhantomData,
         }
     }
@@ -110,6 +122,27 @@ impl<T: Operations> GenDiskBuilder<T> {
         self
     }
 
+    /// Mark this device as a zoned block device.
+    #[cfg(CONFIG_BLK_DEV_ZONED)]
+    pub fn zoned(mut self, enable: bool) -> Self {
+        self.zoned = enable;
+        self
+    }
+
+    /// Set the zone size of this block device.
+    #[cfg(CONFIG_BLK_DEV_ZONED)]
+    pub fn zone_size(mut self, sectors: u32) -> Self {
+        self.zone_size_sectors = sectors;
+        self
+    }
+
+    /// Set the max zone append size for this block device.
+    #[cfg(CONFIG_BLK_DEV_ZONED)]
+    pub fn zone_append_max(mut self, sectors: u32) -> Self {
+        self.zone_append_max_sectors = sectors;
+        self
+    }
+
     /// Build a new `GenDisk` and add it to the VFS.
     pub fn build(
         self,
@@ -130,7 +163,18 @@ impl<T: Operations> GenDiskBuilder<T> {
         lim.physical_block_size = self.physical_block_size;
         lim.max_hw_discard_sectors = self.max_hw_discard_sectors;
         if self.rotational {
-            lim.features = bindings::BLK_FEAT_ROTATIONAL;
+            lim.features |= bindings::BLK_FEAT_ROTATIONAL;
+        }
+
+        #[cfg(CONFIG_BLK_DEV_ZONED)]
+        if self.zoned {
+            if !T::HAS_REPORT_ZONES {
+                return Err(error::code::EINVAL);
+            }
+
+            lim.features |= bindings::BLK_FEAT_ZONED;
+            lim.chunk_sectors = self.zone_size_sectors;
+            lim.max_hw_zone_append_sectors = self.zone_append_max_sectors;
         }
 
         // SAFETY: `tagset.raw_tag_set()` points to a valid and initialized tag set
@@ -160,14 +204,6 @@ impl<T: Operations> GenDiskBuilder<T> {
         // operation, so we will not race.
         unsafe { bindings::set_capacity(gendisk, self.capacity_sectors) };
 
-        crate::error::to_result(
-            // SAFETY: `gendisk` points to a valid and initialized instance of
-            // `struct gendisk`.
-            unsafe {
-                bindings::device_add_disk(core::ptr::null_mut(), gendisk, core::ptr::null_mut())
-            },
-        )?;
-
         recover_data.dismiss();
 
         // INVARIANT: `gendisk` was initialized above.
@@ -195,7 +231,27 @@ impl<T: Operations> GenDiskBuilder<T> {
             GFP_KERNEL,
         )?;
 
-        Ok(disk.into())
+        let disk: Arc<_> = disk.into();
+
+        // SAFETY: `disk.gendisk` is valid for write as we initialized it above. We have exclusive
+        // access.
+        unsafe { (*disk.gendisk).private_data = Arc::as_ptr(&disk).cast_mut().cast() };
+
+        #[cfg(CONFIG_BLK_DEV_ZONED)]
+        if self.zoned {
+            // SAFETY: `disk.gendisk` is valid as we initialized it above. We have exclusive access.
+            unsafe { bindings::blk_revalidate_disk_zones(gendisk) };
+        }
+
+        crate::error::to_result(
+            // SAFETY: `gendisk` points to a valid and initialized instance of
+            // `struct gendisk`.
+            unsafe {
+                bindings::device_add_disk(core::ptr::null_mut(), gendisk, core::ptr::null_mut())
+            },
+        )?;
+
+        Ok(disk)
     }
 
     const VTABLE: bindings::block_device_operations = bindings::block_device_operations {
@@ -209,7 +265,11 @@ impl<T: Operations> GenDiskBuilder<T> {
         getgeo: None,
         set_read_only: None,
         swap_slot_free_notify: None,
-        report_zones: None,
+        report_zones: if T::HAS_REPORT_ZONES {
+            Some(OperationsVTable::<T>::report_zones_callback)
+        } else {
+            None
+        },
         devnode: None,
         alternative_gpt_sector: None,
         get_unique_id: None,
@@ -294,6 +354,18 @@ impl<T: Operations> Drop for GenDisk<T> {
 ///
 /// `self.0` is valid for use as a reference.
 pub struct GenDiskRef<T: Operations>(NonNull<GenDisk<T>>);
+
+impl<T: Operations> GenDiskRef<T> {
+    /// Create a `GenDiskRef` from a pointer to a `GenDisk`.
+    ///
+    /// # Safety
+    ///
+    /// `ptr` must be valid for use as a `GenDisk` reference for the lifetime of the returned
+    /// `GenDiskRef`.
+    pub(crate) unsafe fn from_ptr(ptr: NonNull<GenDisk<T>>) -> GenDiskRef<T> {
+        Self(ptr)
+    }
+}
 
 // SAFETY: It is safe to transfer ownership of `GenDiskRef` across thread boundaries.
 unsafe impl<T: Operations> Send for GenDiskRef<T> {}
