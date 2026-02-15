@@ -93,6 +93,8 @@ pub mod driver;
 #[cfg(CONFIG_DRM = "y")]
 pub mod drm;
 pub mod error;
+#[cfg(all(CONFIG_FAULT_INJECTION, CONFIG_FAULT_INJECTION_CONFIGFS))]
+pub mod fault_injection;
 pub mod faux;
 #[cfg(CONFIG_RUST_FW_LOADER_ABSTRACTIONS)]
 pub mod firmware;
