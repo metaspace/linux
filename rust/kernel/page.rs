@@ -23,6 +23,7 @@ use core::{
     marker::PhantomData,
     mem::ManuallyDrop,
     ops::{Deref, DerefMut},
+    pin::Pin,
     ptr::{
         self,
         NonNull, //
@@ -482,6 +483,38 @@ impl SafePage {
         // allocated page. We transfer that ownership to the new `Owned<Page>` object.
         // Since `Page` and `SafePage` is transparent, we can cast the pointer directly.
         Ok(unsafe { Owned::from_raw(page.cast()) })
+    }
+
+    /// Copies data from this page to another page at the specified offset.
+    ///
+    /// # Arguments
+    ///
+    /// - `dst` - The destination page to copy data to.
+    /// - `offset` - The byte offset within both pages where copying starts.
+    /// - `len` - The number of bytes to copy.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use kernel::page::SafePage;
+    /// # use kernel::alloc::flags::GFP_KERNEL;
+    /// let mut src_page = SafePage::alloc_page(GFP_KERNEL)?;
+    /// let mut dst_page = SafePage::alloc_page(GFP_KERNEL)?;
+    /// src_page.copy_to_page(dst_page.get_pin_mut(), 0, 1024)?;
+    /// # Ok::<(), kernel::error::Error>(())
+    /// ```
+    pub fn copy_to_page(&self, dst: Pin<&mut Self>, offset: usize, len: usize) -> Result {
+        // INVARIANT: The following code makes sure to not cause data races.
+        self.with_pointer_into_page(offset, len, |src| {
+            // SAFETY:
+            // - If `with_pointer_into_page` calls into this closure, then it has performed a
+            //   bounds check and guarantees that `src` is valid for `len` bytes.
+            // - By type invariant and existence of shared reference, there are no other writes to
+            //   `src` during this call.
+            // - By exclusive ownership of `dst`, there are no other writes to `dst` during this
+            //   call.
+            unsafe { dst.write_raw(src, offset, len) }
+        })
     }
 }
 
