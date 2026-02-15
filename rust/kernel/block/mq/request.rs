@@ -148,6 +148,32 @@ impl<T: Operations> RequestInner<T> {
     pub fn as_raw(&self) -> *mut bindings::request {
         self.0.get()
     }
+
+    // Return a valid hctx pointer.
+    fn hctx_raw(&self) -> *mut bindings::blk_mq_hw_ctx {
+        // SAFETY: The requests is guaranteed to be associated with a hardware
+        // context while we have access to it.
+        unsafe { (*self.0.get()).mq_hctx }
+    }
+
+    /// Get a reference to the [`T::HwData`] for the hardware context that this
+    /// request is associated with.
+    pub fn hw_data(&self) -> <T::HwData as ForeignOwnable>::Borrowed<'_> {
+        let hctx = self.hctx_raw();
+
+        // SAFETY: `hctx` is valid and `driver_data` was produced by a call to
+        // `into_foreign` in `Operations::init_hctx_callback`.
+        unsafe { T::HwData::borrow((*hctx).driver_data) }
+    }
+
+    pub fn is_poll(&self) -> bool {
+        let hctx = self.hctx_raw();
+
+        u32::from(
+            // SAFETY: `hctx_raw` returns a valid pointer.
+            unsafe { (*hctx).type_ },
+        ) == bindings::hctx_type_HCTX_TYPE_POLL
+    }
 }
 
 /// A wrapper around a blk-mq [`struct request`]. This represents an IO request.
