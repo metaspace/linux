@@ -8,8 +8,10 @@ use crate::{
         Flags, //
     },
     bindings,
-    error::code::*,
-    error::Result,
+    error::{
+        code::*,
+        Result, //
+    },
     types::{
         Opaque,
         Ownable,
@@ -20,7 +22,7 @@ use crate::{
 use core::{
     marker::PhantomData,
     mem::ManuallyDrop,
-    ops::Deref,
+    ops::{Deref, DerefMut},
     ptr::{
         self,
         NonNull, //
@@ -147,6 +149,13 @@ unsafe impl Send for Page {}
 unsafe impl Sync for Page {}
 
 impl Page {
+    fn alloc_page_raw(flags: Flags) -> Result<NonNull<bindings::page>, AllocError> {
+        // SAFETY: Depending on the value of `gfp_flags`, this call may sleep. Other than that, it
+        // is always safe to call this method.
+        let page = unsafe { bindings::alloc_pages(flags.as_raw(), 0) };
+        NonNull::new(page).ok_or(AllocError)
+    }
+
     /// Allocates a new page.
     ///
     /// # Examples
@@ -170,10 +179,7 @@ impl Page {
     /// ```
     #[inline]
     pub fn alloc_page(flags: Flags) -> Result<Owned<Self>, AllocError> {
-        // SAFETY: Depending on the value of `gfp_flags`, this call may sleep. Other than that, it
-        // is always safe to call this method.
-        let page = unsafe { bindings::alloc_pages(flags.as_raw(), 0) };
-        let page = NonNull::new(page).ok_or(AllocError)?;
+        let page = Self::alloc_page_raw(flags)?;
         // SAFETY: We just successfully allocated a page, so we now have ownership of the newly
         // allocated page. We transfer that ownership to the new `Owned<Page>` object.
         // Since `Page` is transparent, we can cast the pointer directly.
@@ -452,5 +458,54 @@ unsafe impl Ownable for Page {
         // SAFETY: By the type invariants, we have ownership of the page and can free it.
         // Since Page is transparent, we can cast the raw pointer directly.
         unsafe { bindings::__free_pages(this.cast().as_ptr(), 0) };
+    }
+}
+
+/// A page whose data area does not incur data races.
+///
+/// [`SafePage`] has the same usage constraints as other Rust types. Thus, it cannot be mapped to
+/// user space or shared with devices. This makes it safe to reference the contents of the page
+/// while the page is mapped in kernel space.
+///
+/// # Invariants
+///
+/// There are no data races for the contents of this page.
+#[repr(transparent)]
+pub struct SafePage(Page);
+
+impl SafePage {
+    /// Allocate a new `SafePage`.
+    pub fn alloc_page(flags: Flags) -> Result<Owned<Self>, AllocError> {
+        let page = Page::alloc_page_raw(flags)?;
+
+        // SAFETY: We just successfully allocated a page, so we now have ownership of the newly
+        // allocated page. We transfer that ownership to the new `Owned<Page>` object.
+        // Since `Page` and `SafePage` is transparent, we can cast the pointer directly.
+        Ok(unsafe { Owned::from_raw(page.cast()) })
+    }
+}
+
+// SAFETY: `Owned<SafePage>` objects returned by SafePage::alloc_page() follow the requirements of
+// the Ownable abstraction.
+unsafe impl Ownable for SafePage {
+    #[inline]
+    unsafe fn release(this: NonNull<Self>) {
+        // SAFETY: By the type invariants, we have ownership of the page and can free it. Since
+        // `SafePage` and `Page` are transparent, we can cast the raw pointer directly.
+        unsafe { bindings::__free_pages(this.cast().as_ptr(), 0) };
+    }
+}
+
+impl Deref for SafePage {
+    type Target = Page;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl DerefMut for SafePage {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
     }
 }
