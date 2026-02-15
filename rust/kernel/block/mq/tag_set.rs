@@ -106,3 +106,9 @@ impl<T: Operations> PinnedDrop for TagSet<T> {
         unsafe { T::TagSetData::from_foreign(tagset_data) };
     }
 }
+
+// SAFETY: It is safe to transfer ownership of `TagSet` across thread boundaries.
+unsafe impl<T: Operations> Sync for TagSet<T> {}
+
+// SAFETY: It is safe to share references to `TagSet` across thread boundaries.
+unsafe impl<T: Operations> Send for TagSet<T> {}
