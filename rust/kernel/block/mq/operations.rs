@@ -125,6 +125,51 @@ pub trait Operations: Sized {
     fn map_queues(_tag_set: Pin<&mut TagSet<Self>>) {
         build_error!(crate::error::VTABLE_DEFAULT_ERROR)
     }
+
+    /// Called by the kernel when a request has been queued with the driver for too long.
+    ///
+    /// We identify the request by `queue_id` and `tag` as we cannot pass
+    /// `Owned<Request>` or `ARef<Request>`. The driver may hold either of these
+    /// already.
+    ///
+    /// A driver can use [`TagSet::tag_to_rq`] to try to obtain a request reference.
+    ///
+    /// A driver must return [`RequestTimeoutStatus::Completed`] if the request
+    /// was completed during the call. Otherwise
+    /// [`RequestTimeoutStatus::RetryLater`] must be returned, and the kernel
+    /// will retry the call later.
+    fn request_timeout(_tag_set: &TagSet<Self>, _queue_id: u32, _tag: u32) -> RequestTimeoutStatus {
+        build_error!(crate::error::VTABLE_DEFAULT_ERROR)
+    }
+}
+
+/// Return value for [`Operations::request_timeout`].
+#[repr(u32)]
+pub enum RequestTimeoutStatus {
+    /// The request was completed.
+    Completed = bindings::blk_eh_timer_return_BLK_EH_DONE,
+
+    /// The request is still processing, retry later.
+    RetryLater = bindings::blk_eh_timer_return_BLK_EH_RESET_TIMER,
+}
+
+impl RequestTimeoutStatus {
+    /// Create a [`RequestTimeoutStatus`] from an integer.
+    ///
+    /// # SAFETY
+    ///
+    /// - `value` must be one of the enum values declared for [`bindings::blk_eh_timer_return`].
+    pub unsafe fn from_raw(value: u32) -> Self {
+        // SAFETY: By function safety requirements, value is usable as `Self`.
+        unsafe { core::mem::transmute(value) }
+    }
+}
+
+impl From<RequestTimeoutStatus> for u32 {
+    fn from(value: RequestTimeoutStatus) -> Self {
+        // SAFETY: All `RequestTimeoutStatus` representations are valid as `u32`.
+        unsafe { core::mem::transmute(value) }
+    }
 }
 
 /// A vtable for blk-mq to interact with a block device driver.
@@ -496,6 +541,33 @@ impl<T: Operations> OperationsVTable<T> {
         T::map_queues(tag_set);
     }
 
+    /// This function is called by the block layer when a request has been
+    /// queued with the driver for too long.
+    ///
+    /// # Safety
+    ///
+    /// - This function may only be called by blk-mq C infrastructure.
+    /// - `rq` must point to an initialized and valid `Request`.
+    unsafe extern "C" fn request_timeout_callback(
+        rq: *mut bindings::request,
+    ) -> bindings::blk_eh_timer_return {
+        // SAFETY: `rq` is valid and initialized.
+        let hctx = unsafe { (*rq).mq_hctx };
+        // SAFETY: `rq` is valid and initialized, so `hctx` is also valid and initialized.
+        let qid = unsafe { (*hctx).queue_num };
+        // SAFETY: `rq` is valid and initialized.
+        let tag = unsafe { (*rq).tag } as u32;
+        // SAFETY: `rq` is valid and initialized, so `hctx` is also valid and initialized.
+        let queue = unsafe { (*hctx).queue };
+        // SAFETY: `rq` is valid and initialized, so is `queue`.
+        let tag_set = unsafe { (*queue).tag_set };
+        // SAFETY: As `rq` is valid, so is `tag_set`. We never create mutable referennces to a
+        // `TagSet` without proper locking.
+        let tag_set: &TagSet<T> = unsafe { TagSet::from_ptr(tag_set) };
+
+        T::request_timeout(tag_set, qid, tag).into()
+    }
+
     const VTABLE: bindings::blk_mq_ops = bindings::blk_mq_ops {
         queue_rq: Some(Self::queue_rq_callback),
         queue_rqs: if T::HAS_QUEUE_RQS {
@@ -508,7 +580,11 @@ impl<T: Operations> OperationsVTable<T> {
         put_budget: None,
         set_rq_budget_token: None,
         get_rq_budget_token: None,
-        timeout: None,
+        timeout: if T::HAS_REQUEST_TIMEOUT {
+            Some(Self::request_timeout_callback)
+        } else {
+            None
+        },
         poll: if T::HAS_POLL {
             Some(Self::poll_callback)
         } else {
