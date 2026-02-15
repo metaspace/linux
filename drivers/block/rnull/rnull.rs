@@ -206,6 +206,10 @@ module! {
             default: 1,
             description: "Enable/disable FUA support when cache_size is used. Default: 1 (true)",
         },
+        max_sectors: u32 {
+            default: 0,
+            description: "Maximum size of a command (in 512B sectors)",
+        },
     },
 }
 
@@ -282,6 +286,7 @@ impl kernel::InPlaceModule for NullBlkModule {
                     )?,
                     #[cfg(CONFIG_BLK_DEV_RUST_NULL_FAULT_INJECTION)]
                     timeout_inject: Arc::pin_init(FaultConfig::new(c"timeout_inject"), GFP_KERNEL)?,
+                    max_sectors: *module_parameters::max_sectors.value(),
                 })?;
                 disks.push(disk, GFP_KERNEL)?;
             }
@@ -336,6 +341,7 @@ struct NullBlkOptions<'a> {
     init_hctx_inject: Arc<FaultConfig>,
     #[cfg(CONFIG_BLK_DEV_RUST_NULL_FAULT_INJECTION)]
     timeout_inject: Arc<FaultConfig>,
+    max_sectors: u32,
 }
 
 static SHARED_TAG_SET: SetOnce<Arc<TagSet<NullBlkDevice>>> = SetOnce::new();
@@ -407,6 +413,7 @@ impl NullBlkDevice {
             init_hctx_inject,
             #[cfg(CONFIG_BLK_DEV_RUST_NULL_FAULT_INJECTION)]
             timeout_inject,
+            max_sectors,
         } = options;
 
         let mut flags = mq::tag_set::Flags::default();
@@ -502,7 +509,8 @@ impl NullBlkDevice {
             .physical_block_size(block_size_bytes)?
             .rotational(rotational)
             .write_cache(storage.cache_enabled())
-            .forced_unit_access(forced_unit_access && storage.cache_enabled());
+            .forced_unit_access(forced_unit_access && storage.cache_enabled())
+            .max_sectors(max_sectors);
 
         #[cfg(CONFIG_BLK_DEV_ZONED)]
         {
