@@ -266,7 +266,10 @@ impl configfs::AttributeOperations<0> for DeviceConfig {
     }
 }
 
-configfs_simple_field!(DeviceConfig, 1, block_size, u32, check GenDiskBuilder::validate_block_size);
+configfs_simple_field!(DeviceConfig, 1,
+                       block_size, u32,
+                       check GenDiskBuilder::<NullBlkDevice>::validate_block_size
+);
 configfs_simple_bool_field!(DeviceConfig, 2, rotational);
 configfs_simple_field!(DeviceConfig, 3, capacity_mib, u64);
 configfs_simple_field!(DeviceConfig, 4, irq_mode, IRQMode);
