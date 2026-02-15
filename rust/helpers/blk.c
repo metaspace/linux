@@ -27,3 +27,29 @@ bool rust_helper_blk_mq_add_to_batch(struct request *req,
 {
 	return blk_mq_add_to_batch(req, iob, is_error, complete);
 }
+
+__rust_helper struct request *rust_helper_rq_list_pop(struct rq_list *rl)
+{
+	return rq_list_pop(rl);
+}
+
+__rust_helper int rust_helper_rq_list_empty(const struct rq_list *rl)
+{
+	return rq_list_empty(rl);
+}
+
+__rust_helper void rust_helper_rq_list_add_tail(struct rq_list *rl,
+						struct request *rq)
+{
+	rq_list_add_tail(rl, rq);
+}
+
+__rust_helper void rust_helper_rq_list_init(struct rq_list *rl)
+{
+	rq_list_init(rl);
+}
+
+__rust_helper struct request *rust_helper_rq_list_peek(struct rq_list *rl)
+{
+	return rq_list_peek(rl);
+}
