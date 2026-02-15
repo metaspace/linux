@@ -166,6 +166,13 @@ impl<T: Operations> RequestInner<T> {
         unsafe { T::HwData::borrow((*hctx).driver_data) }
     }
 
+    /// Get the queue index for the hardware queue associated with this request.
+    pub fn queue_index(&self) -> u32 {
+        // SAFETY: The requests is guaranteed to be associated with a hardware
+        // context while we have access to it.
+        unsafe { (*self.hctx_raw()).queue_num }
+    }
+
     pub fn is_poll(&self) -> bool {
         let hctx = self.hctx_raw();
 
