@@ -371,3 +371,9 @@ pub fn file_from_location<'a>(loc: &'a core::panic::Location<'a>) -> &'a core::f
         c"<Location::file_as_c_str() not supported>"
     }
 }
+
+/// Returns maximum number of CPUs that may be online on the system.
+pub fn num_possible_cpus() -> u32 {
+    // SAFETY: FFI call with no additional requirements.
+    unsafe { bindings::num_possible_cpus() }
+}
