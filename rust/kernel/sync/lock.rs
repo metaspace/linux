@@ -235,7 +235,31 @@ impl<'a, T: ?Sized, B: Backend> Guard<'a, T, B> {
         self.lock
     }
 
-    pub(crate) fn do_unlocked<U>(&mut self, cb: impl FnOnce() -> U) -> U {
+    /// Temporarily unlock the lock to execute the given closure.
+    ///
+    /// This method unlocks the lock before calling the closure `cb`, and re-locks it afterwards.
+    /// This is useful when you need to perform operations that are not allowed while holding
+    /// certain locks, such as allocating memory (which is prohibited while holding a spinlock).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use kernel::{new_spinlock, prelude::*};
+    /// # use pin_init::stack_pin_init;
+    ///
+    /// stack_pin_init!{
+    ///     let lock = new_spinlock!(())
+    /// }
+    ///
+    /// let mut guard = lock.lock();
+    /// let mut buffer = KVec::new();
+    /// // Temporarily unlock to allocate memory, which should not be done while holding a spinlock.
+    ///  guard.do_unlocked(|| {
+    ///     buffer.push(5u32, GFP_KERNEL)
+    /// })?;
+    /// # Ok::<(), Error>(())
+    /// ```
+    pub fn do_unlocked<U>(&mut self, cb: impl FnOnce() -> U) -> U {
         // SAFETY: The caller owns the lock, so it is safe to unlock it.
         unsafe { B::unlock(self.lock.state.get(), &self.state) };
 
