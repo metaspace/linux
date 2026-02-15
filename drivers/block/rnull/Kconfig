@@ -11,3 +11,14 @@ config BLK_DEV_RUST_NULL
 	  devices that can be configured via various configuration options.
 
 	  If unsure, say N.
+
+config BLK_DEV_RUST_NULL_FAULT_INJECTION
+	bool "Support fault injection for Rust Null test block driver"
+	depends on BLK_DEV_RUST_NULL && FAULT_INJECTION_CONFIGFS
+	help
+	  Enable fault injection support for the Rust null block driver. This
+	  allows injecting errors into block I/O operations for testing error
+	  handling paths and verifying system resilience. Fault injection is
+	  configured through configfs alongside the null block device settings.
+
+	  If unsure, say N.
