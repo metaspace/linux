@@ -2,11 +2,14 @@
 
 //! A container that can be initialized at most once.
 
-use super::atomic::{
-    ordering::{Acquire, Relaxed, Release},
-    Atomic,
-};
 use core::{cell::UnsafeCell, mem::MaybeUninit};
+use kernel::{
+    error::Result,
+    sync::atomic::{
+        ordering::{Acquire, Relaxed, Release},
+        Atomic,
+    },
+};
 
 /// A container that can be populated at most once. Thread safe.
 ///
@@ -76,10 +79,46 @@ impl<T> SetOnce<T> {
         }
     }
 
+    /// Get a reference to the contained object, or populate the [`SetOnce`]
+    /// with the value returned by `callable` and return a reference to that
+    /// object.
+    pub fn as_ref_or_populate_with(&self, callable: impl FnOnce() -> Result<T>) -> Result<&T> {
+        if !self.populate_with(callable)? {
+            while self.init.load(Acquire) != 2 {
+                core::hint::spin_loop();
+            }
+        }
+
+        // SAFETY: By the type invariants of `Self`, `self.init == 2` means that `self.value`
+        // is initialized and valid for shared access.
+        Ok(unsafe { &*self.value.get().cast() })
+    }
+
+    /// Get a reference to the contained object, or populate the [`SetOnce`]
+    /// with `value` and return a reference to that object.
+    pub fn as_ref_or_populate(&self, value: T) -> &T {
+        if !self.populate(value) {
+            while self.init.load(Acquire) != 2 {
+                core::hint::spin_loop();
+            }
+        }
+
+        // SAFETY: By the type invariants of `Self`, `self.init == 2` means that `self.value`
+        // is initialized and valid for shared access.
+        unsafe { &*self.value.get().cast() }
+    }
+
     /// Populate the [`SetOnce`].
     ///
     /// Returns `true` if the [`SetOnce`] was successfully populated.
     pub fn populate(&self, value: T) -> bool {
+        self.populate_with(|| Ok(value)).expect("Cannot error")
+    }
+
+    /// Populate the [`SetOnce`] with the value returned by `callable`.
+    ///
+    /// Returns `true` if the [`SetOnce`] was successfully populated.
+    pub fn populate_with(&self, callable: impl FnOnce() -> Result<T>) -> Result<bool> {
         // INVARIANT: If the swap succeeds:
         //  - We increase `init`.
         //  - We write the valid value `1` to `init`.
@@ -88,16 +127,16 @@ impl<T> SetOnce<T> {
         if let Ok(0) = self.init.cmpxchg(0, 1, Relaxed) {
             // SAFETY: By the type invariants of `Self`, the fact that we succeeded in writing `1`
             // to `self.init` means we obtained exclusive access to `self.value`.
-            unsafe { core::ptr::write(self.value.get().cast(), value) };
+            unsafe { core::ptr::write(self.value.get().cast(), callable()?) };
             // INVARIANT:
             //  - We increase `init`.
             //  - We write the valid value `2` to `init`.
             //  - We release our exclusive access to `self.value` and it is now valid for shared
             //    access.
             self.init.store(2, Release);
-            true
+            Ok(true)
         } else {
-            false
+            Ok(false)
         }
     }
 
