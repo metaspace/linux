@@ -242,12 +242,22 @@ unsafe impl<Data> HasGroup<Data> for Subsystem<Data> {
 ///
 /// To add a subgroup to configfs, pass this type as `ctype` to
 /// [`crate::configfs_attrs`] when creating a group in [`GroupOperations::make_group`].
-#[pin_data]
+#[pin_data(PinnedDrop)]
 pub struct Group<Data> {
     #[pin]
     group: Opaque<bindings::config_group>,
     #[pin]
     data: Data,
+    default_groups: KVec<Arc<dyn CDefaultGroup>>,
+}
+
+#[pinned_drop]
+impl<Data> PinnedDrop for Group<Data> {
+    fn drop(self: Pin<&mut Self>) {
+        // SAFETY: We have exclusive access to `self` and we know the default groups are alive
+        // because we reference them through `self.default_groups`.
+        unsafe { bindings::configfs_remove_default_groups(self.group.get()) };
+    }
 }
 
 impl<Data> Group<Data> {
@@ -259,7 +269,13 @@ impl<Data> Group<Data> {
         name: CString,
         item_type: &'static ItemType<Group<Data>, Data>,
         data: impl PinInit<Data, Error>,
+        default_groups: impl IntoIterator<Item = Arc<dyn CDefaultGroup>>,
     ) -> impl PinInit<Self, Error> {
+        let mut dg = KVec::new();
+        for group in default_groups {
+            dg.push(group, GFP_KERNEL).unwrap();
+        }
+
         try_pin_init!(Self {
             group <- pin_init::init_zeroed().chain(|v: &mut Opaque<bindings::config_group>| {
                 let place = v.get();
@@ -268,11 +284,26 @@ impl<Data> Group<Data> {
                 unsafe {
                     bindings::config_group_init_type_name(place, name.cast(), item_type.as_ptr())
                 };
+
+                for default_group in &dg {
+                    // SAFETY: We keep the default groups alive until `Self` is dropped.
+                    unsafe { bindings::configfs_add_default_group(default_group.group_ptr(), place) }
+                }
                 Ok(())
             }),
             data <- data,
+            default_groups: dg,
         })
     }
+}
+
+/// A trait for default configfs groups added by C code.
+///
+/// Rust abstractions that work with C code that creates configfs groups can implement this trait to
+/// add the groups as default groups via the Rust configfs API.
+pub trait CDefaultGroup {
+    /// Return a raw pointer to the group definition.
+    fn group_ptr(&self) -> *mut bindings::config_group;
 }
 
 // SAFETY: `Group<Data>` embeds a field of type `bindings::config_group`
