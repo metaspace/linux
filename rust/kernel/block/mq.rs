@@ -135,6 +135,7 @@ pub mod tag_set;
 pub use feature::{Feature, Features};
 pub use operations::IoCompletionBatch;
 pub use operations::Operations;
+pub use operations::RequestTimeoutStatus;
 pub use request::Command;
 pub use request::Flag as RequestFlag;
 pub use request::Flags as RequestFlags;
