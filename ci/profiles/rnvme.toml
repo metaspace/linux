@@ -1,0 +1,8 @@
+device = "nvme0n1"
+module = "rnvme"
+module_args = [
+  "poll_queue_count=1",
+  "irq_queue_count=1",
+]
+modprobe = true
+module_reload_policy = "Once"
