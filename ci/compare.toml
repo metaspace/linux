@@ -1,6 +1,6 @@
 plot = [
-  ["rnull", "rnull-lto"],
-  #["rnull", "rnull-randstruct"],
+  #["rnull", "rnull-lto"],
+  ["rnull", "rnull-randstruct"],
 ]
 
 [[build_configs]]
@@ -9,14 +9,14 @@ kernel_config = "rnull"
 latest_rustc = true
 profile = ["rnull", "ci", "release"]
 
-[[build_configs]]
-name = "rnull-lto"
-kernel_config = "rnull-lto"
-latest_rustc = true
-profile = ["rnull", "ci", "release"]
-
 #[[build_configs]]
-#name = "rnull-randstruct"
-#kernel_config = "rnull-randstruct"
+#name = "rnull-lto"
+#kernel_config = "rnull-lto"
 #latest_rustc = true
 #profile = ["rnull", "ci", "release"]
+
+[[build_configs]]
+name = "rnull-randstruct"
+kernel_config = "rnull-randstruct"
+latest_rustc = true
+profile = ["rnull", "ci", "release"]
