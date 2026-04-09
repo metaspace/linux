@@ -224,6 +224,7 @@ impl<T: Operations> TagSet<T> {
                 } else {
                     // We are probably waiting to observe a refcount increment.
                     core::hint::spin_loop();
+                    pr_info!("Waiting to acquire request\n");
                     continue;
                 };
             }

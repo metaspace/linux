@@ -18,6 +18,7 @@
 //! [`Arc<T>`]: crate::sync::Arc
 
 use core::{
+    fmt::Debug,
     marker::PhantomData,
     mem::ManuallyDrop,
     ops::Deref,
@@ -99,6 +100,17 @@ pub struct ARef<T: RefCounted> {
     ptr: NonNull<T>,
     _p: PhantomData<T>,
 }
+
+impl<T> Debug for ARef<T>
+where
+    T: RefCounted,
+{
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("ARef").field("ptr", &self.ptr).finish()
+    }
+}
+
+impl<T: RefCounted> Unpin for ARef<T> {}
 
 // SAFETY: It is safe to send `ARef<T>` to another thread when the underlying `T` is `Sync` because
 // it effectively means sharing `&T` (which is safe because `T` is `Sync`); additionally, it needs

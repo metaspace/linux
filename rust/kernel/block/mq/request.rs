@@ -20,7 +20,7 @@ use crate::{
     },
     types::{ForeignOwnable, Opaque, Ownable, OwnableRefCounted, Owned},
 };
-use core::{ffi::c_void, marker::PhantomData, ops::Deref, pin::Pin, ptr::NonNull};
+use core::{ffi::c_void, fmt::Debug, marker::PhantomData, ops::Deref, pin::Pin, ptr::NonNull};
 
 use super::{
     dma_map_iter::{DmaMapIter, DmaMapMempool},
@@ -296,6 +296,12 @@ impl<T: Operations> Deref for Request<T> {
 
     fn deref(&self) -> &Self::Target {
         &self.0
+    }
+}
+
+impl<T: Operations> Debug for Request<T> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_tuple("Request").finish()
     }
 }
 

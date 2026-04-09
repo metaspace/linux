@@ -73,6 +73,7 @@ impl RegistrationInner {
 #[pinned_drop]
 impl PinnedDrop for RegistrationInner {
     fn drop(self: Pin<&mut Self>) {
+        pr_warn!("Dropping irq::RegistrationInner\n");
         // SAFETY:
         //
         // Safe as per the invariants of `RegistrationInner` and:

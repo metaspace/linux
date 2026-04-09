@@ -50,7 +50,7 @@ pub mod error {
     }
 
     /// A wrapper around a 1 byte block layer error code.
-    #[derive(Clone, Copy, PartialEq, Eq)]
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
     pub struct BlkError(NonZeroU8);
 
     impl BlkError {
