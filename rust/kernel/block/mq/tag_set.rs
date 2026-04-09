@@ -90,7 +90,8 @@ impl<T: Operations> TagSet<T> {
     }
 
     /// Return the pointer to the wrapped `struct blk_mq_tag_set`
-    pub(crate) fn raw_tag_set(&self) -> *mut bindings::blk_mq_tag_set {
+    // TODO: This should not be pub, but abstractions are not done yet
+    pub fn raw_tag_set(&self) -> *mut bindings::blk_mq_tag_set {
         self.inner.get()
     }
 
