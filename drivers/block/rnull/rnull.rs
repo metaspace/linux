@@ -818,9 +818,7 @@ impl NullBlkDevice {
                 & 1
                 == 0
             {
-                return Err(QueueRequestError {
-                    request: rq,
-                });
+                return Err(QueueRequestError { request: rq });
             } else {
                 rq.requeue(true);
                 return Ok(());
