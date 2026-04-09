@@ -218,6 +218,39 @@ impl<T: Operations> RequestInner<T> {
     pub fn payload_bytes(&self) -> u32 {
         unsafe { bindings::blk_rq_payload_bytes(self.0.get()) }
     }
+
+    /// Return a pointer to the [`RequestDataWrapper`] stored in the private area
+    /// of the request structure.
+    ///
+    /// # Safety
+    ///
+    /// - `this` must point to a valid allocation of size at least size of
+    ///   [`Self`] plus size of [`RequestDataWrapper`].
+    pub(crate) unsafe fn wrapper_ptr(this: *mut Self) -> NonNull<RequestDataWrapper<T>> {
+        let request_ptr = this.cast::<bindings::request>();
+        // SAFETY: By safety requirements for this function, `this` is a
+        // valid allocation.
+        let wrapper_ptr =
+            unsafe { bindings::blk_mq_rq_to_pdu(request_ptr).cast::<RequestDataWrapper<T>>() };
+        // SAFETY: By C API contract, `wrapper_ptr` points to a valid allocation
+        // and is not null.
+        unsafe { NonNull::new_unchecked(wrapper_ptr) }
+    }
+
+    /// Return a reference to the [`RequestDataWrapper`] stored in the private
+    /// area of the request structure.
+    pub(crate) fn wrapper_ref(&self) -> &RequestDataWrapper<T> {
+        // SAFETY: By type invariant, `self.0` is a valid allocation. Further,
+        // the private data associated with this request is initialized and
+        // valid. The existence of `&self` guarantees that the private data is
+        // valid as a shared reference.
+        unsafe { Self::wrapper_ptr(core::ptr::from_ref(self).cast_mut()).as_ref() }
+    }
+
+    /// Return a reference to the per-request data associated with this request.
+    pub fn data_ref(&self) -> &T::RequestData {
+        &self.wrapper_ref().data
+    }
 }
 
 /// A wrapper around a blk-mq [`struct request`]. This represents an IO request.
@@ -346,39 +379,6 @@ impl<T: Operations> Request<T> {
             bio: NonNull::new(unsafe { (*self.0 .0.get()).bio.cast() }),
             _p: PhantomData,
         }
-    }
-
-    /// Return a pointer to the [`RequestDataWrapper`] stored in the private area
-    /// of the request structure.
-    ///
-    /// # Safety
-    ///
-    /// - `this` must point to a valid allocation of size at least size of
-    ///   [`Self`] plus size of [`RequestDataWrapper`].
-    pub(crate) unsafe fn wrapper_ptr(this: *mut Self) -> NonNull<RequestDataWrapper<T>> {
-        let request_ptr = this.cast::<bindings::request>();
-        // SAFETY: By safety requirements for this function, `this` is a
-        // valid allocation.
-        let wrapper_ptr =
-            unsafe { bindings::blk_mq_rq_to_pdu(request_ptr).cast::<RequestDataWrapper<T>>() };
-        // SAFETY: By C API contract, `wrapper_ptr` points to a valid allocation
-        // and is not null.
-        unsafe { NonNull::new_unchecked(wrapper_ptr) }
-    }
-
-    /// Return a reference to the [`RequestDataWrapper`] stored in the private
-    /// area of the request structure.
-    pub(crate) fn wrapper_ref(&self) -> &RequestDataWrapper<T> {
-        // SAFETY: By type invariant, `self.0` is a valid allocation. Further,
-        // the private data associated with this request is initialized and
-        // valid. The existence of `&self` guarantees that the private data is
-        // valid as a shared reference.
-        unsafe { Self::wrapper_ptr(core::ptr::from_ref(self).cast_mut()).as_ref() }
-    }
-
-    /// Return a reference to the per-request data associated with this request.
-    pub fn data_ref(&self) -> &T::RequestData {
-        &self.wrapper_ref().data
     }
 
     /// Set the target sector for the request.
@@ -530,7 +530,8 @@ unsafe impl<T: Operations> RefCounted for Request<T> {
     unsafe fn dec_ref(obj: core::ptr::NonNull<Self>) {
         // SAFETY: The type invariants of `RefCounted` guarantee that `obj` is valid
         // for read.
-        let wrapper_ptr = unsafe { Self::wrapper_ptr(obj.as_ptr()).as_ptr() };
+        let wrapper_ptr =
+            unsafe { RequestInner::wrapper_ptr(obj.cast::<RequestInner<T>>().as_ptr()).as_ptr() };
         // SAFETY: The type invariant of `Request` guarantees that the private
         // data area is initialized and valid.
         let refcount = unsafe { &*RequestDataWrapper::refcount_ptr(wrapper_ptr) };
@@ -589,7 +590,8 @@ unsafe impl<T: Operations> Ownable for Request<T> {
     unsafe fn release(this: NonNull<Self>) {
         // SAFETY: The safety requirements of this function guarantee that `this`
         // is valid for read.
-        let wrapper_ptr = unsafe { Self::wrapper_ptr(this.as_ptr()).as_ptr() };
+        let wrapper_ptr =
+            unsafe { RequestInner::wrapper_ptr(this.cast::<RequestInner<T>>().as_ptr()).as_ptr() };
         // SAFETY: The type invariant of `Request` guarantees that the private
         // data area is initialized and valid.
         let refcount = unsafe { &*RequestDataWrapper::refcount_ptr(wrapper_ptr) };

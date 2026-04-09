@@ -8,7 +8,10 @@ use crate::{
     bindings,
     block::{
         error::BlkResult,
-        mq::{gen_disk::GenDiskRef, request::RequestDataWrapper, IdleRequest, Request, TagSet},
+        mq::{
+            gen_disk::GenDiskRef, request::RequestDataWrapper, request::RequestInner, IdleRequest,
+            Request, TagSet,
+        },
     },
     error::{from_result, to_result, Result},
     owned::OwnableRefCounted,
@@ -457,7 +460,7 @@ impl<T: Operations> OperationsVTable<T> {
         from_result(|| {
             // SAFETY: By the safety requirements of this function, `rq` points
             // to a valid allocation.
-            let pdu = unsafe { Request::wrapper_ptr(rq.cast::<Request<T>>()) };
+            let pdu = unsafe { RequestInner::wrapper_ptr(rq.cast::<RequestInner<T>>()) };
 
             // SAFETY: The refcount field is allocated but not initialized, so
             // it is valid for writes.

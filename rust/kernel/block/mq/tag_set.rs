@@ -5,7 +5,10 @@
 //! C header: [`include/linux/blk-mq.h`](srctree/include/linux/blk-mq.h)
 
 use crate::{
-    block::mq::{operations::OperationsVTable, request::RequestDataWrapper, Operations},
+    block::mq::{
+        operations::OperationsVTable, request::RequestDataWrapper, request::RequestInner,
+        Operations,
+    },
     error::{self, Result},
     pr_warn,
     prelude::{ENOMEM, *},
@@ -190,7 +193,7 @@ impl<T: Operations> TagSet<T> {
             // SAFETY: if `rq_ptr`is not null, it is a valid request pointer.
             let refcount_ptr = unsafe {
                 RequestDataWrapper::refcount_ptr(
-                    Request::wrapper_ptr(rq_ptr.cast::<Request<T>>()).as_ptr(),
+                    RequestInner::wrapper_ptr(rq_ptr.cast::<RequestInner<T>>()).as_ptr(),
                 )
             };
 
