@@ -1,0 +1,7 @@
+# SPDX-License-Identifier: GPL-2.0
+#
+# Rust nvme device driver configuration
+
+config RUST_NVME
+	tristate "Rust NVMe PCI driver"
+	depends on RUST

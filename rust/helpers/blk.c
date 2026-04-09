@@ -4,6 +4,7 @@
 #include <linux/blk-mq.h>
 #include <linux/blk-mq-dma.h>
 #include <linux/blkdev.h>
+#include <linux/irqflags.h>
 
 void *rust_helper_blk_mq_rq_to_pdu(struct request *rq)
 {
@@ -79,4 +80,16 @@ __rust_helper bool rust_helper_blk_rq_dma_unmap(struct request *req,
 						enum pci_p2pdma_map_type map)
 {
 	return blk_rq_dma_unmap(req, dma_dev, state, mapped_len, map);
+}
+
+__rust_helper unsigned long rust_helper_local_irq_save(void)
+{
+	unsigned long flags;
+	local_irq_save(flags);
+	return flags;
+}
+
+__rust_helper void rust_helper_local_irq_restore(unsigned long flags)
+{
+	local_irq_restore(flags);
 }

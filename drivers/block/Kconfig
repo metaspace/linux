@@ -18,6 +18,7 @@ if BLK_DEV
 
 source "drivers/block/null_blk/Kconfig"
 source "drivers/block/rnull/Kconfig"
+source "drivers/block/rnvme/Kconfig"
 
 config BLK_DEV_FD
 	tristate "Normal floppy disk support"
