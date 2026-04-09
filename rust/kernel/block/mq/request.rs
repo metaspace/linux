@@ -574,6 +574,14 @@ impl<T: Operations> Owned<Request<T>> {
 
     /// Notify the block layer that the request has been completed.
     pub fn end(self, status: u8) {
+        debug_assert!(
+            self.wrapper_ref()
+                .refcount()
+                .as_atomic()
+                .load(ordering::Acquire)
+                == 0
+        );
+
         let request_ptr = self.0 .0.get().cast();
         core::mem::forget(self);
         // SAFETY: By type invariant, `this.0` was a valid `struct request`. The
