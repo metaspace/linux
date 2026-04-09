@@ -62,7 +62,9 @@ pub trait Operations: Sized {
     type TagSetData: ForeignOwnable;
 
     /// Called by the kernel to get an initializer for a `Pin<&mut RequestData>`.
-    fn new_request_data() -> impl PinInit<Self::RequestData>;
+    fn new_request_data(
+        _tagset_data: ForeignBorrowed<'_, Self::TagSetData>,
+    ) -> impl PinInit<Self::RequestData>;
 
     /// Called by the kernel to queue a request with the driver. If `is_last` is
     /// `false`, the driver is allowed to defer committing the request.
@@ -452,7 +454,7 @@ impl<T: Operations> OperationsVTable<T> {
     /// - The allocation pointed to by `rq` must be at the size of `Request`
     ///   plus the size of `RequestDataWrapper`.
     unsafe extern "C" fn init_request_callback(
-        _set: *mut bindings::blk_mq_tag_set,
+        set: *mut bindings::blk_mq_tag_set,
         rq: *mut bindings::request,
         _hctx_idx: crate::ffi::c_uint,
         _numa_node: crate::ffi::c_uint,
@@ -466,7 +468,12 @@ impl<T: Operations> OperationsVTable<T> {
             // it is valid for writes.
             unsafe { RequestDataWrapper::refcount_ptr(pdu.as_ptr()).write(Refcount::new(0)) };
 
-            let initializer = T::new_request_data();
+            // SAFETY: Because `set` is a `TagSet<T>`, `driver_data` comes from
+            // a call to `into_foregn` by the initializer returned by
+            // `TagSet::try_new`.
+            let tagset_data = unsafe { T::TagSetData::borrow((*set).driver_data.cast()) };
+
+            let initializer = T::new_request_data(tagset_data);
 
             // SAFETY: `pdu` is a valid pointer as established above. We do not
             // touch `pdu` if `__pinned_init` returns an error. We promise ot to

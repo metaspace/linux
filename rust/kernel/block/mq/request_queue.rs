@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: GPL-2.0
 
-use super::{request::SyncRequest, Command, Operations};
+use super::{request::SyncRequest, Command, Operations, TagSet};
 use crate::{
     error::from_err_ptr,
-    owned::Owned,
+    owned::{Ownable, Owned},
     prelude::*,
+    sync::Arc,
     types::{ForeignOwnable, Opaque},
 };
-use core::marker::PhantomData;
+use core::{marker::PhantomData, ptr::NonNull};
 
 /// A structure describing the queues associated with a block device.
 ///
@@ -24,6 +25,19 @@ impl<T> RequestQueue<T>
 where
     T: Operations,
 {
+    /// Allocate a new [`RequestQueue`].
+    pub fn new(tagset: Arc<TagSet<T>>, queue_data: T::QueueData) -> Result<Owned<Self>> {
+        let mq = from_err_ptr(unsafe {
+            bindings::blk_mq_alloc_queue(
+                tagset.into_raw().cast_mut().cast(),
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+            )
+        })?;
+        unsafe { (*mq).queuedata = queue_data.into_foreign() as _ };
+        Ok(unsafe { Owned::from_raw(NonNull::new_unchecked(mq.cast())) })
+    }
+
     /// Create a [`RequestQueue`] from a raw `bindings::request_queue` pointer
     ///
     /// # Safety
@@ -67,5 +81,15 @@ where
         })?;
         // SAFETY: `rq` is valid and will be owned by new `SyncRequest`.
         Ok(unsafe { SyncRequest::from_raw(rq) })
+    }
+}
+
+unsafe impl<T: Operations> Ownable for RequestQueue<T> {
+    unsafe fn release(this: core::ptr::NonNull<Self>) {
+        let tagset = unsafe { (*this.as_ptr().cast::<bindings::request_queue>()).tag_set };
+        // SAFETY: We own the queue
+        unsafe { bindings::blk_mq_destroy_queue(this.as_ptr().cast()) }
+        // SAFETY: The pointer owns a refcount.
+        drop(unsafe { Arc::from_raw(tagset.cast::<TagSet<T>>()) })
     }
 }

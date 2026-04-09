@@ -81,6 +81,7 @@
 //!     type TagSetData = ();
 //!
 //!     fn new_request_data(
+//!         _tagset_data: <() as ForeignOwnable>::Borrowed<'_>,
 //!     ) -> impl PinInit<()> {
 //!         pin_init::zeroed::<()>()
 //!     }
