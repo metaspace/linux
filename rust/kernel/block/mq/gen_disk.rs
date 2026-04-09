@@ -28,6 +28,7 @@ pub struct GenDiskBuilder<T> {
     physical_block_size: u32,
     capacity_sectors: u64,
     max_hw_discard_sectors: u32,
+    max_segments: u16,
     #[cfg(CONFIG_BLK_DEV_ZONED)]
     zoned: bool,
     #[cfg(CONFIG_BLK_DEV_ZONED)]
@@ -49,6 +50,7 @@ impl<T> Default for GenDiskBuilder<T> {
             physical_block_size: bindings::PAGE_SIZE as u32,
             capacity_sectors: 0,
             max_hw_discard_sectors: 0,
+            max_segments: 0,
             #[cfg(CONFIG_BLK_DEV_ZONED)]
             zoned: false,
             #[cfg(CONFIG_BLK_DEV_ZONED)]
@@ -169,6 +171,12 @@ impl<T: Operations> GenDiskBuilder<T> {
         self
     }
 
+    /// Maximum count of physically contiguous segments.
+    pub fn max_segments(mut self, segments: u16) -> Self {
+        self.max_segments = segments;
+        self
+    }
+
     /// Set the I/O segment memory alignment mask for the block device. I/O requests to this device
     /// will be split between segments wherever either the memory address of the end of the previous
     /// segment or the memory address of the beginning of the current segment is not aligned to
@@ -198,6 +206,7 @@ impl<T: Operations> GenDiskBuilder<T> {
         lim.physical_block_size = self.physical_block_size;
         lim.max_hw_discard_sectors = self.max_hw_discard_sectors;
         lim.max_sectors = self.max_sectors;
+        lim.max_segments = self.max_segments;
         lim.virt_boundary_mask = self.virt_boundary_mask;
         if self.rotational {
             lim.features = Feature::Rotational.into();
