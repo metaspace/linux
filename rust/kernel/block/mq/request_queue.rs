@@ -1,7 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0
 
-use super::Operations;
-use crate::types::{ForeignOwnable, Opaque};
+use super::{request::SyncRequest, Command, Operations};
+use crate::{
+    error::from_err_ptr,
+    owned::Owned,
+    prelude::*,
+    types::{ForeignOwnable, Opaque},
+};
 use core::marker::PhantomData;
 
 /// A structure describing the queues associated with a block device.
@@ -53,5 +58,14 @@ where
     pub fn start_stopped_hw_queues_async(&self) {
         // SAFETY: By type invariant, `self.0` is a valid `request_queue`.
         unsafe { bindings::blk_mq_start_stopped_hw_queues(self.0.get(), true) }
+    }
+
+    /// Allocate a synchronous request.
+    pub fn alloc_sync_request(&self, command: Command) -> Result<Owned<SyncRequest<T>>> {
+        let rq = from_err_ptr(unsafe {
+            bindings::blk_mq_alloc_request(self.0.get(), command.as_raw(), 0)
+        })?;
+        // SAFETY: `rq` is valid and will be owned by new `SyncRequest`.
+        Ok(unsafe { SyncRequest::from_raw(rq) })
     }
 }
