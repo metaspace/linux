@@ -203,6 +203,21 @@ impl<T: Operations> RequestInner<T> {
             unsafe { (*hctx).type_ },
         ) == bindings::hctx_type_HCTX_TYPE_POLL
     }
+
+    /// Returns the tag associated with this request
+    pub fn tag(&self) -> i32 {
+        unsafe { (*self.0.get()).tag }
+    }
+
+    /// Returns the number of physical contiguous segments in the payload of this request
+    pub fn nr_phys_segments(&self) -> u16 {
+        unsafe { bindings::blk_rq_nr_phys_segments(self.0.get()) }
+    }
+
+    /// Returns the number of bytes in the payload of this request
+    pub fn payload_bytes(&self) -> u32 {
+        unsafe { bindings::blk_rq_payload_bytes(self.0.get()) }
+    }
 }
 
 /// A wrapper around a blk-mq [`struct request`]. This represents an IO request.
