@@ -198,6 +198,11 @@ impl Segment<'_> {
 
         length
     }
+
+    /// Get a raw pointer to the first page of this segment.
+    pub fn page(&self) -> *mut bindings::page {
+        self.bio_vec.bv_page
+    }
 }
 
 impl core::fmt::Display for Segment<'_> {
