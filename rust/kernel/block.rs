@@ -40,6 +40,10 @@ pub mod error {
         }
 
         declare_err!(BLK_STS_NOTSUPP, "Operation not supported.");
+        declare_err!(
+            BLK_STS_RESOURCE,
+            "Could not process the I/O request right now due to resource exhaustion."
+        );
         declare_err!(BLK_STS_IOERR, "Generic IO error.");
         declare_err!(BLK_STS_DEV_RESOURCE, "Device resource busy. Retry later.");
         declare_err!(BLK_STS_TIMEOUT, "Operation timed out.");
@@ -98,6 +102,12 @@ pub mod error {
     impl From<kernel::error::Error> for BlkError {
         fn from(_value: kernel::error::Error) -> Self {
             code::BLK_STS_IOERR
+        }
+    }
+
+    impl From<kernel::alloc::AllocError> for BlkError {
+        fn from(_value: kernel::alloc::AllocError) -> Self {
+            code::BLK_STS_RESOURCE
         }
     }
 
