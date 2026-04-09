@@ -2,6 +2,7 @@
 
 #include <linux/bio.h>
 #include <linux/blk-mq.h>
+#include <linux/blk-mq-dma.h>
 #include <linux/blkdev.h>
 
 void *rust_helper_blk_mq_rq_to_pdu(struct request *rq)
@@ -58,4 +59,24 @@ __rust_helper struct request *
 rust_helper_blk_mq_tag_to_rq(struct blk_mq_tags *tags, unsigned int tag)
 {
 	return blk_mq_tag_to_rq(tags, tag);
+}
+
+__rust_helper unsigned int rust_helper_blk_rq_payload_bytes(struct request *rq)
+{
+	return blk_rq_payload_bytes(rq);
+}
+
+__rust_helper unsigned short
+rust_helper_blk_rq_nr_phys_segments(struct request *rq)
+{
+	return blk_rq_nr_phys_segments(rq);
+}
+
+__rust_helper bool rust_helper_blk_rq_dma_unmap(struct request *req,
+						struct device *dma_dev,
+						struct dma_iova_state *state,
+						size_t mapped_len,
+						enum pci_p2pdma_map_type map)
+{
+	return blk_rq_dma_unmap(req, dma_dev, state, mapped_len, map);
 }

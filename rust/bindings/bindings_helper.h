@@ -39,6 +39,7 @@
 #include <linux/badblocks.h>
 #include <linux/bitmap.h>
 #include <linux/blk-mq.h>
+#include <linux/blk-mq-dma.h>
 #include <linux/blk_types.h>
 #include <linux/blkdev.h>
 #include <linux/clk.h>
