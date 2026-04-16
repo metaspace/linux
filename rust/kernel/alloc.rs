@@ -6,6 +6,7 @@ pub mod allocator;
 pub mod kbox;
 pub mod kvec;
 pub mod layout;
+pub mod mempool;
 
 pub use self::kbox::Box;
 pub use self::kbox::KBox;
