@@ -10,11 +10,11 @@ use crate::{
     io::{
         Io,
         IoCapable,
-        IoKnownSize,
         Mmio,
         MmioRaw, //
     },
     prelude::*,
+    ptr::KnownSize,
     sync::aref::ARef, //
 };
 use core::{
@@ -60,14 +60,37 @@ pub struct Extended;
 pub trait ConfigSpaceKind {
     /// The size of this configuration space in bytes.
     const SIZE: usize;
+
+    /// Region type for this kind of config space. This should be [`crate::io::Region<SIZE>`].
+    type Region: ?Sized + KnownSize;
+
+    /// Obtain pointer with actual size information.
+    fn null_ptr_from_size(size: ConfigSpaceSize) -> *mut Self::Region;
 }
 
 impl ConfigSpaceKind for Normal {
     const SIZE: usize = 256;
+
+    type Region = crate::io::Region<256>;
+
+    #[inline]
+    fn null_ptr_from_size(size: ConfigSpaceSize) -> *mut Self::Region {
+        core::ptr::slice_from_raw_parts_mut(core::ptr::null_mut::<u8>(), size.into_raw())
+            as *mut Self::Region
+    }
 }
 
 impl ConfigSpaceKind for Extended {
     const SIZE: usize = 4096;
+
+    type Region = crate::io::Region<4096>;
+
+    #[inline]
+    fn null_ptr_from_size(_: ConfigSpaceSize) -> *mut Self::Region {
+        // Small optimization. For a extended config space, we already know that the size
+        // is 4096.
+        core::ptr::slice_from_raw_parts_mut(core::ptr::null_mut::<u8>(), 4096) as *mut Self::Region
+    }
 }
 
 /// The PCI configuration space of a device.
@@ -87,28 +110,28 @@ pub struct ConfigSpace<'a, S: ConfigSpaceKind = Extended> {
 macro_rules! impl_config_space_io_capable {
     ($ty:ty, $read_fn:ident, $write_fn:ident) => {
         impl<'a, S: ConfigSpaceKind> IoCapable<$ty> for ConfigSpace<'a, S> {
-            unsafe fn io_read(&self, address: usize) -> $ty {
+            unsafe fn io_read(&self, address: *mut $ty) -> $ty {
+                // CAST: The offset is cast to `i32` because the C functions expect a 32-bit
+                // signed offset parameter. PCI configuration space size is at most 4096 bytes,
+                // so the value always fits within `i32` without truncation or sign change.
+                let addr = address.addr() as i32;
                 let mut val: $ty = 0;
 
                 // Return value from C function is ignored in infallible accessors.
-                let _ret =
-                    // SAFETY: By the type invariant `self.pdev` is a valid address.
-                    // CAST: The offset is cast to `i32` because the C functions expect a 32-bit
-                    // signed offset parameter. PCI configuration space size is at most 4096 bytes,
-                    // so the value always fits within `i32` without truncation or sign change.
-                    unsafe { bindings::$read_fn(self.pdev.as_raw(), address as i32, &mut val) };
-
+                // SAFETY: By the type invariant `self.pdev` is a valid address.
+                let _ = unsafe { bindings::$read_fn(self.pdev.as_raw(), addr, &mut val) };
                 val
             }
 
-            unsafe fn io_write(&self, value: $ty, address: usize) {
+            unsafe fn io_write(&self, value: $ty, address: *mut $ty) {
+                // CAST: The offset is cast to `i32` because the C functions expect a 32-bit
+                // signed offset parameter. PCI configuration space size is at most 4096 bytes,
+                // so the value always fits within `i32` without truncation or sign change.
+                let addr = address.addr() as i32;
+
                 // Return value from C function is ignored in infallible accessors.
-                let _ret =
-                    // SAFETY: By the type invariant `self.pdev` is a valid address.
-                    // CAST: The offset is cast to `i32` because the C functions expect a 32-bit
-                    // signed offset parameter. PCI configuration space size is at most 4096 bytes,
-                    // so the value always fits within `i32` without truncation or sign change.
-                    unsafe { bindings::$write_fn(self.pdev.as_raw(), address as i32, value) };
+                // SAFETY: By the type invariant `self.pdev` is a valid address.
+                let _ = unsafe { bindings::$write_fn(self.pdev.as_raw(), addr, value) };
             }
         }
     };
@@ -120,21 +143,13 @@ impl_config_space_io_capable!(u16, pci_read_config_word, pci_write_config_word);
 impl_config_space_io_capable!(u32, pci_read_config_dword, pci_write_config_dword);
 
 impl<'a, S: ConfigSpaceKind> Io for ConfigSpace<'a, S> {
+    type Type = S::Region;
+
     /// Returns the base address of the I/O region. It is always 0 for configuration space.
     #[inline]
-    fn addr(&self) -> usize {
-        0
+    fn as_ptr(&self) -> *mut Self::Type {
+        S::null_ptr_from_size(self.pdev.cfg_size())
     }
-
-    /// Returns the maximum size of the configuration space.
-    #[inline]
-    fn maxsize(&self) -> usize {
-        self.pdev.cfg_size().into_raw()
-    }
-}
-
-impl<'a, S: ConfigSpaceKind> IoKnownSize for ConfigSpace<'a, S> {
-    const MIN_SIZE: usize = S::SIZE;
 }
 
 /// A PCI BAR to perform I/O-Operations on.
@@ -219,7 +234,7 @@ impl<const SIZE: usize> Bar<SIZE> {
 
     fn release(&self) {
         // SAFETY: The safety requirements are guaranteed by the type invariant of `self.pdev`.
-        unsafe { Self::do_release(&self.pdev, self.io.addr(), self.num) };
+        unsafe { Self::do_release(&self.pdev, self.io.as_ptr().addr(), self.num) };
     }
 }
 
@@ -267,6 +282,7 @@ impl Device<device::Bound> {
     }
 
     /// Returns the size of configuration space.
+    #[inline]
     pub fn cfg_size(&self) -> ConfigSpaceSize {
         // SAFETY: `self.as_raw` is a valid pointer to a `struct pci_dev`.
         let size = unsafe { (*self.as_raw()).cfg_size };

@@ -284,7 +284,7 @@ impl<const SIZE: usize> IoMem<SIZE> {
 impl<const SIZE: usize> Drop for IoMem<SIZE> {
     fn drop(&mut self) {
         // SAFETY: Safe as by the invariant of `Io`.
-        unsafe { bindings::iounmap(self.io.addr() as *mut c_void) }
+        unsafe { bindings::iounmap(self.io.as_ptr().cast()) }
     }
 }
 
