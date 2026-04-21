@@ -14,7 +14,10 @@ use crate::{
     },
     error::to_result,
     fs::file,
-    io::Io,
+    io::{
+        Io,
+        IoCapable, //
+    },
     prelude::*,
     ptr::KnownSize,
     sync::aref::ARef,
@@ -998,6 +1001,47 @@ impl<T: ?Sized + KnownSize> Io for Coherent<T> {
         self.as_mut_ptr()
     }
 }
+
+/// Implements [`IoCapable`] on `Coherent` for `$ty` using `read_volatile` and `write_volatile`.
+macro_rules! impl_coherent_io_capable {
+    ($(#[$attr:meta])* $ty:ty) => {
+        $(#[$attr])*
+        impl<T: ?Sized + KnownSize> IoCapable<$ty> for Coherent<T> {
+            #[inline]
+            unsafe fn io_read(&self, address: *mut $ty) -> $ty {
+                // SAFETY:
+                // - By the safety precondition, the address is within bounds of the allocation and
+                //   aligned.
+                // - Using read_volatile() here so that race with hardware is well-defined.
+                // - Using read_volatile() here is not sound if it races with other CPU per Rust
+                //   rules, but this is allowed per LKMM.
+                // - The macro is only used on primitives so all bit patterns are valid.
+                unsafe { address.read_volatile() }
+            }
+
+            #[inline]
+            unsafe fn io_write(&self, value: $ty, address: *mut $ty) {
+                // SAFETY:
+                // - By the safety precondition, the address is within bounds of the allocation and
+                //   aligned.
+                // - Using write_volatile() here so that race with hardware is well-defined.
+                // - Using write_volatile() here is not sound if it races with other CPU per Rust
+                //   rules, but this is allowed per LKMM.
+                unsafe { address.write_volatile(value) }
+            }
+        }
+    };
+}
+
+// DMA regions support atomic 8, 16, and 32-bit accesses.
+impl_coherent_io_capable!(u8);
+impl_coherent_io_capable!(u16);
+impl_coherent_io_capable!(u32);
+// DMA regions on 64-bit systems also support atomic 64-bit accesses.
+impl_coherent_io_capable!(
+    #[cfg(CONFIG_64BIT)]
+    u64
+);
 
 impl<'a, B: ?Sized + KnownSize, T: ?Sized> crate::io::View<'a, Coherent<B>, T> {
     /// Returns a DMA handle which may be given to the device as the DMA address base of
