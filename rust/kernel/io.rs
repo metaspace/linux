@@ -4,6 +4,8 @@
 //!
 //! C header: [`include/asm-generic/io.h`](srctree/include/asm-generic/io.h)
 
+use core::mem::MaybeUninit;
+
 use crate::{
     bindings,
     prelude::*,
@@ -231,6 +233,55 @@ pub trait IoCapable<T> {
     /// - The range `[address..address + size_of::<T>()]` must be within the bounds of `Self`.
     /// - `address` must be aligned.
     unsafe fn io_write(&self, value: T, address: *mut T);
+}
+
+/// Trait indicating that an I/O backend supports memory copy operations.
+///
+/// # Safety
+///
+/// If [`IS_MAPPED`] is overridden to true, it must be correct per documentation.
+pub unsafe trait IoCopyable {
+    /// Whether the pointers for this I/O backend are in the CPU address space, and are coherently
+    /// mapped.
+    ///
+    /// When this is true, it means that memory can be accessed with byte-wise atomic memory copy.
+    const IS_MAPPED: bool = false;
+
+    /// Copy `size` bytes from `address` to `buffer`.
+    ///
+    /// # Safety
+    ///
+    /// - The range `[address..address + size]` must be within the bounds of `Self`.
+    /// - `buffer` is valid for write for `size` bytes.
+    #[inline]
+    unsafe fn copy_from_io(&self, address: *mut u8, buffer: *mut u8, size: usize) {
+        const_assert!(Self::IS_MAPPED);
+
+        // Use `bindings::memcpy` instead of copy_nonoverlapping for volatile.
+        // SAFETY:
+        // - `buffer` is valid for write for `size` bytes.
+        // - `IS_MAPPED` guarantees `address` is in CPU address space, with safety requirements
+        //   `address` is valid for read for `size` bytes.
+        unsafe { bindings::memcpy(buffer.cast(), address.cast(), size) };
+    }
+
+    /// Copy `size` bytes from `buffer` to `address`.
+    ///
+    /// # Safety
+    ///
+    /// - The range `[address..address + size]` must be within the bounds of `Self`.
+    /// - `buffer` is valid for read for `size` bytes.
+    #[inline]
+    unsafe fn copy_to_io(&self, address: *mut u8, buffer: *const u8, size: usize) {
+        const_assert!(Self::IS_MAPPED);
+
+        // Use `bindings::memcpy` instead of copy_nonoverlapping for volatile.
+        // SAFETY:
+        // - `IS_MAPPED` guarantees `address` is in CPU address space, with safety requirements
+        //   `address` is valid for write for `size` bytes.
+        // - `buffer` is valid for read for `size` bytes.
+        unsafe { bindings::memcpy(address.cast(), buffer.cast(), size) };
+    }
 }
 
 /// Describes a given I/O location: its offset, width, and type to convert the raw value from and
@@ -841,6 +892,19 @@ impl_mmio_io_capable!(
     writeq
 );
 
+// SAFETY: `IS_MAPPED` is not overridden.
+unsafe impl<T: ?Sized + KnownSize> IoCopyable for Mmio<T> {
+    unsafe fn copy_from_io(&self, address: *mut u8, buffer: *mut u8, size: usize) {
+        // SAFETY: Per safety requirement.
+        unsafe { bindings::memcpy_fromio(buffer.cast(), address.cast(), size) };
+    }
+
+    unsafe fn copy_to_io(&self, address: *mut u8, buffer: *const u8, size: usize) {
+        // SAFETY: Per safety requirement.
+        unsafe { bindings::memcpy_toio(address.cast(), buffer.cast(), size) };
+    }
+}
+
 impl<T: ?Sized + KnownSize> Io for Mmio<T> {
     type Type = T;
 
@@ -1026,6 +1090,173 @@ impl<T, IO: ?Sized + Io + IoCapable<T>> View<'_, IO, T> {
     pub fn write_val(&self, value: T) {
         // SAFETY: Per type invariant.
         unsafe { self.io.io_write(value, self.ptr) }
+    }
+}
+
+impl<'a, IO: ?Sized, T> View<'a, IO, [T]> {
+    /// Returns the length of the slice in number of elements.
+    #[inline]
+    pub fn len(self) -> usize {
+        self.as_ptr().len()
+    }
+
+    /// Returns `true` if the slice has a length of 0.
+    #[inline]
+    pub fn is_empty(self) -> bool {
+        self.len() == 0
+    }
+}
+
+impl<T, IO: ?Sized + Io + IoCopyable> View<'_, IO, T> {
+    /// Copy-read from I/O memory.
+    ///
+    /// There is no atomicity gurantee.
+    #[inline]
+    pub fn copy_read(self) -> T
+    where
+        T: FromBytes,
+    {
+        // Optimized path if I/O backend is CPU mapped.
+        if IO::IS_MAPPED {
+            // SAFETY:
+            // - `IS_MAPPED` guarantees `self.ptr` is in CPU address space, with type invariants
+            //   `self.ptr` is valid for read for `size` bytes.
+            // - `T: FromBytes` guarantee that all bit patterns are valid.
+            // - Using read_volatile() here so that race with hardware is well-defined.
+            // - Using read_volatile() here is not sound if it races with other CPU per Rust
+            //   rules, but this is allowed per LKMM.
+            return unsafe { self.ptr.read_volatile() };
+        }
+
+        let mut buf = MaybeUninit::<T>::uninit();
+        // SAFETY:
+        // - Per type invariants.
+        // - `buf.as_mut_ptr()` is valid for write for `size_of::<T>()` bytes.
+        unsafe {
+            self.io
+                .copy_from_io(self.ptr.cast(), buf.as_mut_ptr().cast(), size_of::<T>())
+        };
+        // SAFETY: T: FromBytes` guarantee that all bit patterns are valid.
+        unsafe { buf.assume_init() }
+    }
+
+    /// Write to I/O memory.
+    ///
+    /// There is no atomicity gurantee.
+    #[inline]
+    pub fn copy_write(self, value: T)
+    where
+        T: AsBytes,
+    {
+        // Optimized path if I/O backend is CPU mapped.
+        if IO::IS_MAPPED {
+            // SAFETY:
+            // - `IS_MAPPED` guarantees `self.ptr` is in CPU address space, with safety requirements
+            //   `self.ptr` is valid for write for `size` bytes.
+            // - Using write_volatile() here so that race with hardware is well-defined.
+            // - Using write_volatile() here is not sound if it races with other CPU per Rust
+            //   rules, but this is allowed per LKMM.
+            unsafe { self.ptr.write_volatile(value) };
+            return;
+        }
+
+        // SAFETY:
+        // - Per type invariants.
+        // - `&raw const value` is valid for read for `size_of::<T>()` bytes.
+        unsafe {
+            self.io
+                .copy_to_io(self.ptr.cast(), (&raw const value).cast(), size_of::<T>())
+        };
+        core::mem::forget(value);
+    }
+}
+
+impl<IO: ?Sized + Io + IoCopyable> View<'_, IO, [u8]> {
+    /// Copy bytes from slice to I/O memory.
+    #[inline]
+    pub fn copy_from_slice(self, data: &[u8]) {
+        assert_eq!(self.len(), data.len());
+
+        // SAFETY:
+        // - Per type invariants.
+        // - `data.as_ptr()` is valid for read for `data.len()` bytes.
+        unsafe {
+            self.io
+                .copy_to_io(self.ptr.cast(), data.as_ptr(), data.len())
+        }
+    }
+
+    /// Copy bytes from I/O memory to slice.
+    #[inline]
+    pub fn copy_to_slice(self, data: &mut [u8]) {
+        assert_eq!(self.len(), data.len());
+
+        // SAFETY:
+        // - Per type invariants.
+        // - `data.as_mut_ptr()` is valid for write for `data.len()` bytes.
+        unsafe {
+            self.io
+                .copy_from_io(self.ptr.cast(), data.as_mut_ptr(), data.len())
+        }
+    }
+
+    fn copy_from_io_slice_via_buffer<T: ?Sized + Io + IoCopyable>(&self, data: View<'_, T, [u8]>) {
+        let mut buf = MaybeUninit::<[u8; 256]>::uninit();
+
+        let mut dst_ptr = self.ptr.cast::<u8>();
+        let mut src_ptr = data.ptr.cast::<u8>();
+        let mut len = self.len();
+
+        while len != 0 {
+            let copy_len = core::cmp::min(len, 256);
+            // SAFETY:
+            // - `src_ptr` is valid for I/O read of `copy_len` bytes per type invariants of `data`.
+            // - `buf.as_mut_ptr()` is valid for write for `copy_len` bytes as `copy_len <= 256`.
+            unsafe {
+                data.io
+                    .copy_from_io(src_ptr, buf.as_mut_ptr().cast(), copy_len)
+            };
+
+            // SAFETY:
+            // - `dst_ptr` is valid for I/O write of `copy_len` bytes per type invariants of `self`.
+            // - `buf.as_mut_ptr()` is valid for write for `copy_len` bytes as `copy_len <= 256`.
+            unsafe { self.io.copy_to_io(dst_ptr, buf.as_ptr().cast(), copy_len) };
+
+            dst_ptr = dst_ptr.wrapping_add(copy_len);
+            src_ptr = src_ptr.wrapping_add(copy_len);
+            len -= copy_len;
+        }
+    }
+
+    /// Copy bytes from `data` I/O slice to the `self` I/O slice.
+    pub fn copy_from_io_slice<T: ?Sized + Io + IoCopyable>(&self, data: View<'_, T, [u8]>) {
+        assert_eq!(self.len(), data.len());
+
+        if T::IS_MAPPED {
+            // SAFETY:
+            // - Per type invariants.
+            // - `data.as_ptr()` is valid for read for `data.len()` bytes.
+            unsafe {
+                self.io
+                    .copy_to_io(self.ptr.cast(), data.as_ptr().cast(), data.len())
+            }
+        } else if IO::IS_MAPPED {
+            // SAFETY:
+            // - Per type invariants.
+            // - `self.as_ptr()` is valid for write for `self.len()` bytes.
+            unsafe {
+                data.io
+                    .copy_from_io(data.ptr.cast(), self.as_ptr().cast(), self.len())
+            }
+        } else {
+            self.copy_from_io_slice_via_buffer(data)
+        }
+    }
+
+    /// Copy bytes from `self` I/O slice to the `data` I/O slice.
+    #[inline]
+    pub fn copy_to_io_slice<T: ?Sized + Io + IoCopyable>(self, data: View<'_, T, [u8]>) {
+        data.copy_from_io_slice(self)
     }
 }
 

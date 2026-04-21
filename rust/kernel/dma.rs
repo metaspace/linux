@@ -16,7 +16,8 @@ use crate::{
     fs::file,
     io::{
         Io,
-        IoCapable, //
+        IoCapable,
+        IoCopyable, //
     },
     prelude::*,
     ptr::KnownSize,
@@ -996,6 +997,11 @@ impl_coherent_io_capable!(
     #[cfg(CONFIG_64BIT)]
     u64
 );
+
+// SAFETY: `Coherent` is mapped to CPU address space.
+unsafe impl<T: ?Sized + KnownSize> IoCopyable for Coherent<T> {
+    const IS_MAPPED: bool = true;
+}
 
 impl<'a, B: ?Sized + KnownSize, T: ?Sized> crate::io::View<'a, Coherent<B>, T> {
     /// Returns a DMA handle which may be given to the device as the DMA address base of
