@@ -14,6 +14,7 @@ use crate::{
     },
     error::to_result,
     fs::file,
+    io::Io,
     prelude::*,
     ptr::KnownSize,
     sync::aref::ARef,
@@ -988,6 +989,59 @@ unsafe impl<T: KnownSize + Send + ?Sized> Send for Coherent<T> {}
 // `as_slice_mut`) are `unsafe`, and callers are responsible for ensuring no data races occur.
 // The safe methods only return metadata or raw pointers whose use requires `unsafe`.
 unsafe impl<T: KnownSize + ?Sized + AsBytes + FromBytes + Sync> Sync for Coherent<T> {}
+
+impl<T: ?Sized + KnownSize> Io for Coherent<T> {
+    type Type = T;
+
+    #[inline]
+    fn as_ptr(&self) -> *mut Self::Type {
+        self.as_mut_ptr()
+    }
+}
+
+impl<'a, B: ?Sized + KnownSize, T: ?Sized> crate::io::View<'a, Coherent<B>, T> {
+    /// Returns a DMA handle which may be given to the device as the DMA address base of
+    /// the region.
+    #[inline]
+    pub fn dma_handle(&self) -> DmaAddress {
+        let base = self.io();
+        let offset = self.as_ptr().addr() - base.as_ptr().addr();
+        // CAST: The offseted DMA address can never overflow.
+        base.dma_handle() + offset as DmaAddress
+    }
+
+    /// Returns a reference to the data in the region.
+    ///
+    /// # Safety
+    ///
+    /// * Callers must ensure that the device does not read/write to/from memory while the returned
+    ///   slice is live.
+    /// * Callers must ensure that this call does not race with a write to the same region while
+    ///   the returned slice is live.
+    #[inline]
+    pub unsafe fn as_ref(self) -> &'a T {
+        let ptr = self.as_ptr();
+        // SAFETY: pointer is aligned and valid per type invariant of `View`. Aliasing rule is
+        // satisfied per safety requirement.
+        unsafe { &*ptr }
+    }
+
+    /// Returns a mutable reference to the data in the region.
+    ///
+    /// # Safety
+    ///
+    /// * Callers must ensure that the device does not read/write to/from memory while the returned
+    ///   slice is live.
+    /// * Callers must ensure that this call does not race with a read or write to the same region
+    ///   while the returned slice is live.
+    #[inline]
+    pub unsafe fn as_mut(self) -> &'a mut T {
+        let ptr = self.as_ptr();
+        // SAFETY: pointer is aligned and valid per type invariant of `View`. Aliasing rule is
+        // satisfied per safety requirement.
+        unsafe { &mut *ptr }
+    }
+}
 
 impl<T: KnownSize + AsBytes + ?Sized> debugfs::BinaryWriter for Coherent<T> {
     fn write_to_slice(
