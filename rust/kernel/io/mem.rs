@@ -214,7 +214,7 @@ impl<const SIZE: usize> ExclusiveIoMem<SIZE> {
 }
 
 impl<const SIZE: usize> Deref for ExclusiveIoMem<SIZE> {
-    type Target = Mmio<SIZE>;
+    type Target = Mmio<super::Region<SIZE>>;
 
     fn deref(&self) -> &Self::Target {
         &self.iomem
@@ -289,7 +289,7 @@ impl<const SIZE: usize> Drop for IoMem<SIZE> {
 }
 
 impl<const SIZE: usize> Deref for IoMem<SIZE> {
-    type Target = Mmio<SIZE>;
+    type Target = Mmio<super::Region<SIZE>>;
 
     fn deref(&self) -> &Self::Target {
         // SAFETY: Safe as by the invariant of `IoMem`.

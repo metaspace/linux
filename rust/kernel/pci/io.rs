@@ -238,7 +238,7 @@ impl<const SIZE: usize> Drop for Bar<SIZE> {
 }
 
 impl<const SIZE: usize> Deref for Bar<SIZE> {
-    type Target = Mmio<SIZE>;
+    type Target = Mmio<crate::io::Region<SIZE>>;
 
     fn deref(&self) -> &Self::Target {
         // SAFETY: By the type invariant of `Self`, the MMIO range in `self.io` is properly mapped.

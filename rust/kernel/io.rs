@@ -44,6 +44,8 @@ pub struct Region<const SIZE: usize = 0> {
 }
 
 impl<const SIZE: usize> KnownSize for Region<SIZE> {
+    const MIN_SIZE: usize = SIZE;
+
     #[inline(always)]
     fn size(p: *const Self) -> usize {
         (p as *const [u8]).len()
@@ -169,7 +171,7 @@ impl<T: ?Sized + KnownSize> MmioRaw<T> {
 /// }
 ///
 /// impl<const SIZE: usize> Deref for IoMem<SIZE> {
-///    type Target = Mmio<SIZE>;
+///    type Target = Mmio<Region<SIZE>>;
 ///
 ///    fn deref(&self) -> &Self::Target {
 ///         // SAFETY: The memory range stored in `self` has been properly mapped in `Self::new`.
@@ -187,7 +189,7 @@ impl<T: ?Sized + KnownSize> MmioRaw<T> {
 /// # }
 /// ```
 #[repr(transparent)]
-pub struct Mmio<const SIZE: usize = 0>(MmioRaw<Region<SIZE>>);
+pub struct Mmio<T: ?Sized>(MmioRaw<T>);
 
 /// Checks whether an access of type `U` at the given `offset`
 /// is valid within this region.
@@ -462,9 +464,10 @@ pub trait Io {
     /// use kernel::io::{
     ///     Io,
     ///     Mmio,
+    ///     Region,
     /// };
     ///
-    /// fn do_reads(io: &Mmio) -> Result {
+    /// fn do_reads(io: &Mmio<Region>) -> Result {
     ///     // 32-bit read from address `0x10`.
     ///     let v: u32 = io.try_read(0x10)?;
     ///
@@ -496,9 +499,10 @@ pub trait Io {
     /// use kernel::io::{
     ///     Io,
     ///     Mmio,
+    ///     Region,
     /// };
     ///
-    /// fn do_writes(io: &Mmio) -> Result {
+    /// fn do_writes(io: &Mmio<Region>) -> Result {
     ///     // 32-bit write of value `1` at address `0x10`.
     ///     io.try_write(0x10, 1u32)?;
     ///
@@ -534,6 +538,7 @@ pub trait Io {
     ///     register,
     ///     Io,
     ///     Mmio,
+    ///     Region,
     /// };
     ///
     /// register! {
@@ -549,7 +554,7 @@ pub trait Io {
     ///     }
     /// }
     ///
-    /// fn do_write_reg(io: &Mmio) -> Result {
+    /// fn do_write_reg(io: &Mmio<Region>) -> Result {
     ///
     ///     io.try_write_reg(VERSION::new(1, 0))
     /// }
@@ -579,9 +584,10 @@ pub trait Io {
     /// use kernel::io::{
     ///     Io,
     ///     Mmio,
+    ///     Region,
     /// };
     ///
-    /// fn do_update(io: &Mmio<0x1000>) -> Result {
+    /// fn do_update(io: &Mmio<Region<0x1000>>) -> Result {
     ///     io.try_update(0x10, |v: u32| {
     ///         v + 1
     ///     })
@@ -616,9 +622,10 @@ pub trait Io {
     /// use kernel::io::{
     ///     Io,
     ///     Mmio,
+    ///     Region,
     /// };
     ///
-    /// fn do_reads(io: &Mmio<0x1000>) {
+    /// fn do_reads(io: &Mmio<Region<0x1000>>) {
     ///     // 32-bit read from address `0x10`.
     ///     let v: u32 = io.read(0x10);
     ///
@@ -648,9 +655,10 @@ pub trait Io {
     /// use kernel::io::{
     ///     Io,
     ///     Mmio,
+    ///     Region,
     /// };
     ///
-    /// fn do_writes(io: &Mmio<0x1000>) {
+    /// fn do_writes(io: &Mmio<Region<0x1000>>) {
     ///     // 32-bit write of value `1` at address `0x10`.
     ///     io.write(0x10, 1u32);
     ///
@@ -682,6 +690,7 @@ pub trait Io {
     ///     register,
     ///     Io,
     ///     Mmio,
+    ///     Region,
     /// };
     ///
     /// register! {
@@ -697,7 +706,7 @@ pub trait Io {
     ///     }
     /// }
     ///
-    /// fn do_write_reg(io: &Mmio<0x1000>) {
+    /// fn do_write_reg(io: &Mmio<Region<0x1000>>) {
     ///     io.write_reg(VERSION::new(1, 0));
     /// }
     /// ```
@@ -726,9 +735,10 @@ pub trait Io {
     /// use kernel::io::{
     ///     Io,
     ///     Mmio,
+    ///     Region,
     /// };
     ///
-    /// fn do_update(io: &Mmio<0x1000>) {
+    /// fn do_update(io: &Mmio<Region<0x1000>>) {
     ///     io.update(0x10, |v: u32| {
     ///         v + 1
     ///     })
@@ -778,7 +788,7 @@ pub trait IoKnownSize: Io {
 macro_rules! impl_mmio_io_capable {
     ($mmio:ident, $(#[$attr:meta])* $ty:ty, $read_fn:ident, $write_fn:ident) => {
         $(#[$attr])*
-        impl<const SIZE: usize> IoCapable<$ty> for $mmio<SIZE> {
+        impl<T: ?Sized> IoCapable<$ty> for $mmio<T> {
             unsafe fn io_read(&self, address: usize) -> $ty {
                 // SAFETY: By the trait invariant `address` is a valid address for MMIO operations.
                 unsafe { bindings::$read_fn(address as *const c_void) }
@@ -805,7 +815,7 @@ impl_mmio_io_capable!(
     writeq
 );
 
-impl<const SIZE: usize> Io for Mmio<SIZE> {
+impl<T: ?Sized + KnownSize> Io for Mmio<T> {
     /// Returns the base address of this mapping.
     #[inline]
     fn addr(&self) -> usize {
@@ -819,18 +829,18 @@ impl<const SIZE: usize> Io for Mmio<SIZE> {
     }
 }
 
-impl<const SIZE: usize> IoKnownSize for Mmio<SIZE> {
-    const MIN_SIZE: usize = SIZE;
+impl<T: ?Sized + KnownSize> IoKnownSize for Mmio<T> {
+    const MIN_SIZE: usize = T::MIN_SIZE;
 }
 
-impl<const SIZE: usize> Mmio<SIZE> {
+impl<T: ?Sized + KnownSize> Mmio<T> {
     /// Converts an `MmioRaw` into an `Mmio` instance, providing the accessors to the MMIO mapping.
     ///
     /// # Safety
     ///
     /// Callers must ensure that `addr` is the start of a valid I/O mapped memory region of size
-    /// `maxsize`.
-    pub unsafe fn from_raw(raw: &MmioRaw<Region<SIZE>>) -> &Self {
+    /// `addr.size()`.
+    pub unsafe fn from_raw(raw: &MmioRaw<T>) -> &Self {
         // SAFETY: `Mmio` is a transparent wrapper around `MmioRaw`.
         unsafe { &*core::ptr::from_ref(raw).cast() }
     }
@@ -843,9 +853,9 @@ impl<const SIZE: usize> Mmio<SIZE> {
 ///
 /// See [`Mmio::relaxed`] for a usage example.
 #[repr(transparent)]
-pub struct RelaxedMmio<const SIZE: usize = 0>(Mmio<SIZE>);
+pub struct RelaxedMmio<T: ?Sized>(Mmio<T>);
 
-impl<const SIZE: usize> Io for RelaxedMmio<SIZE> {
+impl<T: ?Sized + KnownSize> Io for RelaxedMmio<T> {
     #[inline]
     fn addr(&self) -> usize {
         self.0.addr()
@@ -857,11 +867,11 @@ impl<const SIZE: usize> Io for RelaxedMmio<SIZE> {
     }
 }
 
-impl<const SIZE: usize> IoKnownSize for RelaxedMmio<SIZE> {
-    const MIN_SIZE: usize = SIZE;
+impl<T: ?Sized + KnownSize> IoKnownSize for RelaxedMmio<T> {
+    const MIN_SIZE: usize = T::MIN_SIZE;
 }
 
-impl<const SIZE: usize> Mmio<SIZE> {
+impl<T: ?Sized> Mmio<T> {
     /// Returns a [`RelaxedMmio`] reference that performs relaxed I/O operations.
     ///
     /// Relaxed accessors do not provide ordering guarantees with respect to DMA or memory accesses
@@ -873,18 +883,19 @@ impl<const SIZE: usize> Mmio<SIZE> {
     /// use kernel::io::{
     ///     Io,
     ///     Mmio,
+    ///     Region,
     ///     RelaxedMmio,
     /// };
     ///
-    /// fn do_io(io: &Mmio<0x100>) {
+    /// fn do_io(io: &Mmio<Region<0x100>>) {
     ///     // The access is performed using `readl_relaxed` instead of `readl`.
     ///     let v = io.relaxed().read32(0x10);
     /// }
     ///
     /// ```
-    pub fn relaxed(&self) -> &RelaxedMmio<SIZE> {
-        // SAFETY: `RelaxedMmio` is `#[repr(transparent)]` over `Mmio`, so `Mmio<SIZE>` and
-        // `RelaxedMmio<SIZE>` have identical layout.
+    pub fn relaxed(&self) -> &RelaxedMmio<T> {
+        // SAFETY: `RelaxedMmio` is `#[repr(transparent)]` over `Mmio`, so `Mmio<T>` and
+        // `RelaxedMmio<T>` have identical layout.
         unsafe { core::mem::transmute(self) }
     }
 }
