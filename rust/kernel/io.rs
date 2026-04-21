@@ -7,7 +7,11 @@
 use crate::{
     bindings,
     prelude::*,
-    ptr::KnownSize, //
+    ptr::KnownSize,
+    transmute::{
+        AsBytes,
+        FromBytes, //
+    }, //
 };
 
 pub mod mem;
@@ -296,6 +300,13 @@ impl_usize_ioloc!(u8, u16, u32, u64);
 pub trait Io {
     /// Type of this I/O region. For untyped I/O regions, [`Region`] type can be used.
     type Type: ?Sized + KnownSize;
+
+    /// Get a [`View`] covering the entire region.
+    #[inline]
+    fn as_view(&self) -> View<'_, Self, Self::Type> {
+        // SAFETY: This is an empty projection, so it trivially satisfies the invariant.
+        unsafe { View::new_unchecked(self, self.as_ptr()) }
+    }
 
     /// Returns the base pointer of this mapping.
     ///
@@ -912,3 +923,137 @@ impl_mmio_io_capable!(
     readq_relaxed,
     writeq_relaxed
 );
+
+/// A view into an I/O region.
+///
+/// # Invariants
+///
+/// - `ptr` is aligned for `T`
+/// - `ptr` has same provenance as `io.as_ptr()`
+/// - `ptr.byte_offset_from(io.as_ptr())` is between 0 to
+///   `KnownSize::size(io.as_ptr()) - KnownSize::size(ptr)`.
+///
+/// These invariants are trivially satisfied if the pointer is created via pointer projection.
+pub struct View<'a, IO: ?Sized, T: ?Sized> {
+    io: &'a IO,
+    ptr: *mut T,
+}
+
+impl<'a, IO: ?Sized, T: ?Sized> View<'a, IO, T> {
+    // For `io_project!` macro use only.
+    #[doc(hidden)]
+    #[inline]
+    pub fn as_view(&self) -> Self {
+        *self
+    }
+
+    /// Create a view of a provided I/O region.
+    ///
+    /// # Safety
+    ///
+    /// `ptr` must satisfy the invariants of the view type.
+    #[inline]
+    pub unsafe fn new_unchecked(io: &'a IO, ptr: *mut T) -> Self {
+        // INVARIANT: Per function safety requirement.
+        Self { io, ptr }
+    }
+
+    /// Obtain the underlying I/O region.
+    #[inline]
+    pub fn io(self) -> &'a IO {
+        self.io
+    }
+
+    /// Obtain a pointer to the subview.
+    ///
+    /// The interpretation of the pointer depends on the underlying I/O region.
+    #[inline]
+    pub fn as_ptr(self) -> *mut T {
+        self.ptr
+    }
+}
+
+impl<IO: ?Sized, T: ?Sized> Clone for View<'_, IO, T> {
+    #[inline]
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<IO: ?Sized, T: ?Sized> Copy for View<'_, IO, T> {}
+
+impl<'a, IO: ?Sized, T: ?Sized> View<'a, IO, T> {
+    /// Try to convert this view into a different typed I/O view.
+    ///
+    /// The target type must be of same or smaller size to current type, and the current view must
+    /// be properly aligned for the target type.
+    #[inline]
+    pub fn try_cast<U>(self) -> Result<View<'a, IO, U>>
+    where
+        T: KnownSize + FromBytes + AsBytes,
+        U: FromBytes + AsBytes,
+    {
+        if size_of::<U>() > KnownSize::size(self.ptr) {
+            return Err(EINVAL);
+        }
+
+        if self.ptr.addr() % align_of::<U>() != 0 {
+            return Err(EINVAL);
+        }
+
+        // INVARIANT: We have checked bounds and alignment.
+        Ok(View {
+            io: self.io,
+            ptr: self.ptr.cast(),
+        })
+    }
+}
+
+/// Project an I/O type to a subview of it.
+///
+/// The syntax is of form `io_project!(io, proj)` where `io` is an expression to a type that
+/// implements [`Io`] and `proj` is a [projection specification](kernel::ptr::project!).
+///
+/// In addition to projecting from [`Io`], you may also project from a [`View`] of an [`Io`].
+///
+/// # Examples
+///
+/// ```
+/// use kernel::io::{
+///     io_project,
+///     Mmio,
+///     View,
+/// };
+/// struct MyStruct { field: u32, }
+///
+/// // SAFETY: All bit patterns are acceptable values for `MyStruct`.
+/// unsafe impl kernel::transmute::FromBytes for MyStruct{};
+/// // SAFETY: Instances of `MyStruct` have no uninitialized portions.
+/// unsafe impl kernel::transmute::AsBytes for MyStruct{};
+///
+/// # fn test(mmio: &Mmio<[MyStruct]>) -> Result {
+/// // let mmio: Mmio<[MyStruct]>;
+/// let field: View<'_, _, u32> = io_project!(mmio, [try: 1].field);
+/// let whole: View<'_, _, MyStruct> = io_project!(mmio, [try: 2]);
+/// let nested: View<'_, Mmio<_>, u32> = io_project!(whole, .field);
+/// # Ok::<(), Error>(()) }
+#[macro_export]
+#[doc(hidden)]
+macro_rules! io_project {
+    ($io:expr, $($proj:tt)*) => {{
+        // Bring `as_view` to scope.
+        use $crate::io::Io as _;
+
+        // Convert IO to view for unified handling.
+        // This also takes advantage to deref coercion.
+        let view: $crate::io::View<'_, _, _> = $io.as_view();
+        let ptr = $crate::ptr::project!(
+            mut view.as_ptr(), $($proj)*
+        );
+        // SAFETY: projection of a projection is still a valid projection.
+        unsafe { $crate::io::View::new_unchecked(view.io(), ptr) }
+    }};
+}
+
+#[doc(inline)]
+pub use crate::io_project;
