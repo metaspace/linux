@@ -231,7 +231,7 @@ impl<const SIZE: usize> Deref for ExclusiveIoMem<SIZE> {
 /// [`IoMem`] always holds an [`MmioRaw`] instance that holds a valid pointer to the
 /// start of the I/O memory mapped region.
 pub struct IoMem<const SIZE: usize = 0> {
-    io: MmioRaw<SIZE>,
+    io: MmioRaw<super::Region<SIZE>>,
 }
 
 impl<const SIZE: usize> IoMem<SIZE> {
@@ -266,7 +266,7 @@ impl<const SIZE: usize> IoMem<SIZE> {
             return Err(ENOMEM);
         }
 
-        let io = MmioRaw::new(addr as usize, size)?;
+        let io = MmioRaw::new_region(addr as usize, size)?;
         let io = IoMem { io };
 
         Ok(io)
