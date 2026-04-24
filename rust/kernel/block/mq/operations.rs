@@ -673,4 +673,10 @@ impl<T: Operations> IoCompletionBatch<T> {
             false => Err(rq),
         }
     }
+
+    /// Return a shared view of the requests currently queued in this completion batch.
+    pub fn list(&self) -> &RequestList<T, ARef<Request<T>>> {
+        let request_list_ptr: *const bindings::rq_list = unsafe { &(*self.inner).req_list };
+        unsafe { RequestList::<T, ARef<Request<T>>>::from_raw(request_list_ptr) }
+    }
 }
