@@ -11,6 +11,7 @@ use crate::{
         mq::{gen_disk::GenDiskRef, request::RequestDataWrapper, IdleRequest, Request, TagSet},
     },
     error::{from_result, to_result, Result},
+    owned::OwnableRefCounted,
     prelude::*,
     sync::{aref::ARef, atomic::ordering, Refcount},
     types::{ForeignOwnable, Owned},
@@ -139,6 +140,14 @@ pub trait Operations: Sized {
     /// [`RequestTimeoutStatus::RetryLater`] must be returned, and the kernel
     /// will retry the call later.
     fn request_timeout(_tag_set: &TagSet<Self>, _queue_id: u32, _tag: u32) -> RequestTimeoutStatus {
+        build_error!(crate::error::VTABLE_DEFAULT_ERROR)
+    }
+
+    /// Called by the kernel after a batch of polled requests have been collected via
+    /// [`IoCompletionBatch::add_request`] and before the batch is completed by the block layer. The
+    /// driver can use this hook to perform per-request cleanup (such as DMA unmapping) that must
+    /// happen before the request is handed back to the block layer.
+    fn batch_complete(_rq: ARef<Request<Self>>) {
         build_error!(crate::error::VTABLE_DEFAULT_ERROR)
     }
 }
@@ -609,6 +618,27 @@ impl<T: Operations> OperationsVTable<T> {
     pub(crate) const fn build() -> &'static bindings::blk_mq_ops {
         &Self::VTABLE
     }
+
+    unsafe extern "C" fn batch_complete_callback(batch: *mut bindings::io_comp_batch) {
+        let batch = IoCompletionBatch {
+            inner: batch,
+            _p: PhantomData,
+        };
+
+        for request in batch.list().iter() {
+            T::batch_complete(request.clone());
+            let request = match OwnableRefCounted::try_from_shared(request) {
+                Ok(request) => request,
+                Err(_request) => {
+                    pr_warn!("Failed to get unique request reference\n");
+                    continue;
+                }
+            };
+            core::mem::forget(request);
+        }
+
+        unsafe { bindings::blk_mq_end_request_batch(batch.inner) };
+    }
 }
 
 /// A batch of I/O completions for polled I/O.
@@ -636,9 +666,9 @@ pub struct IoCompletionBatch<T> {
 impl<T: Operations> IoCompletionBatch<T> {
     /// Attempt to add a completed request to this batch.
     ///
-    /// This method tries to add `rq` to the batch for deferred completion. If
-    /// the request is successfully added, ownership is transferred to the batch
-    /// and the request will be completed later when the batch is processed.
+    /// This method tries to add `rq` to the batch for deferred completion. If the request is
+    /// successfully added, ownership of the reference is transferred to the batch and the request
+    /// will be completed later when the batch is processed.
     ///
     /// # Arguments
     ///
@@ -652,16 +682,16 @@ impl<T: Operations> IoCompletionBatch<T> {
     /// [`Request::complete`](super::Request::complete).
     pub fn add_request(
         &mut self,
-        rq: Owned<Request<T>>,
+        rq: ARef<Request<T>>,
         error: bool,
-    ) -> Result<(), Owned<Request<T>>> {
+    ) -> Result<(), ARef<Request<T>>> {
         // SAFETY: By type invariant, `self.inner` is a valid `io_comp_batch`.
         let ret = unsafe {
             bindings::blk_mq_add_to_batch(
                 rq.as_raw(),
                 self.inner,
                 error,
-                Some(bindings::blk_mq_end_request_batch),
+                Some(OperationsVTable::<T>::batch_complete_callback),
             )
         };
 
