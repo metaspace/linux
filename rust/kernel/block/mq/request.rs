@@ -717,3 +717,54 @@ where
         T::RequestData::run(aref, context).into_c()
     }
 }
+
+mod private {
+    /// Supertrait used to seal [`super::ConvertRaw`].
+    ///
+    /// External code (and even other modules in this crate) cannot name
+    /// `private::Sealed`, so no new implementations of [`super::ConvertRaw`] can
+    /// appear outside this module.
+    pub trait Sealed {}
+}
+
+pub trait ConvertRaw: private::Sealed {
+    /// Create a [`Self`] from a raw request pointer.
+    ///
+    /// # Safety
+    ///
+    /// - The request pointed to by `ptr` must satisfythe invariants of both [`Request`] and
+    ///   [`Self`].
+    /// - The refcount of the request pointed to by `ptr` must satisfy the safety requirements of
+    ///   the request pointer type that `ConvertRaw` is implemented on.
+    unsafe fn from_raw(ptr: *mut bindings::request) -> Self;
+
+    /// Return a raw pointer to the underlying C structure.
+    fn as_raw(&self) -> *mut bindings::request;
+}
+
+impl<T: Operations> private::Sealed for Owned<IdleRequest<T>> {}
+impl<T: Operations> ConvertRaw for Owned<IdleRequest<T>> {
+    unsafe fn from_raw(ptr: *mut bindings::request) -> Self {
+        unsafe { IdleRequest::from_raw(ptr) }
+    }
+
+    fn as_raw(&self) -> *mut bindings::request {
+        // Reach through Owned -> IdleRequest -> RequestInner to the raw pointer.
+        // Calling `self.as_raw()` would resolve to this very method (infinite recursion).
+        (**self).0 .0.get()
+    }
+}
+
+impl<T: Operations> private::Sealed for ARef<Request<T>> {}
+impl<T: Operations> ConvertRaw for ARef<Request<T>> {
+    unsafe fn from_raw(ptr: *mut bindings::request) -> Self {
+        unsafe { Request::aref_from_raw(ptr) }
+    }
+
+    fn as_raw(&self) -> *mut bindings::request {
+        // Call the inherent `RequestInner::as_raw` directly to avoid resolving back to
+        // the ConvertRaw trait method (which would be infinite recursion). Deref
+        // coercion turns `&ARef<Request<T>>` into `&RequestInner<T>`.
+        RequestInner::<T>::as_raw(self)
+    }
+}

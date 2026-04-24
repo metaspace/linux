@@ -2,9 +2,12 @@
 
 use core::marker::PhantomData;
 
-use crate::{owned::Owned, types::Opaque};
+use crate::types::{ARef, Opaque};
 
-use super::{IdleRequest, Operations};
+use super::{
+    request::ConvertRaw,
+    Operations, Request,
+};
 
 /// A list of [`Request`].
 ///
@@ -14,12 +17,12 @@ use super::{IdleRequest, Operations};
 ///   pointers point to valid requests, or are both null.
 /// - All requests in the list are valid for use as `IdleRequest<T>`.
 #[repr(transparent)]
-pub struct RequestList<T: Operations> {
+pub struct RequestList<T: Operations, U: ConvertRaw> {
     inner: Opaque<bindings::rq_list>,
-    _p: PhantomData<T>,
+    _p: PhantomData<(T, U)>,
 }
 
-impl<T: Operations> RequestList<T> {
+impl<T: Operations, U: ConvertRaw> RequestList<T, U> {
     /// Create a new [`RequestList`].
     pub fn new() -> Self {
         let this = Self {
@@ -42,11 +45,24 @@ impl<T: Operations> RequestList<T> {
     /// - The list pointed to by `ptr` must satisfy the invariants of `Self`.
     /// - The list pointed to by `ptr` must remain valid for use as a mutable reference for the
     ///   duration of `'a`.
-    pub unsafe fn from_raw<'a>(ptr: *mut bindings::rq_list) -> &'a mut Self {
+    pub unsafe fn from_raw_mut<'a>(ptr: *mut bindings::rq_list) -> &'a mut Self {
         // SAFETY:
         // - RequestList is transparent.
         // - By function safety requirements, `ptr` is valid for us as a mutable reference.
         unsafe { &mut (*ptr.cast()) }
+    }
+
+    /// Create a shared reference to a [`RequestList`] from a raw pointer.
+    ///
+    /// # SAFETY
+    /// - The list pointed to by `ptr` must satisfy the invariants of `Self`.
+    /// - The list pointed to by `ptr` must remain valid for use as a shared reference for the
+    ///   duration of `'a`.
+    pub unsafe fn from_raw<'a>(ptr: *const bindings::rq_list) -> &'a Self {
+        // SAFETY:
+        // - RequestList is transparent.
+        // - By function safety requirements, `ptr` is valid for us as a shared reference.
+        unsafe { &(*ptr.cast()) }
     }
 
     /// Check if the list is empty.
@@ -59,21 +75,21 @@ impl<T: Operations> RequestList<T> {
     /// Pop a request from the list.
     ///
     /// Returns [`None`] if the list is empty.
-    pub fn pop(&mut self) -> Option<Owned<IdleRequest<T>>> {
+    pub fn pop(&mut self) -> Option<U> {
         // SAFETY: By type invariant `self.inner` is a valid list.
         let ptr = unsafe { bindings::rq_list_pop(self.inner.get()) };
 
         if !ptr.is_null() {
             // SAFETY: If `rq_list_pop` returns a non-null pointer, it points to a valid request. By
             // type invariant all requests in this list are valid for use as `IdleRequest`.
-            Some(unsafe { IdleRequest::from_raw(ptr) })
+            Some(unsafe { U::from_raw(ptr) })
         } else {
             None
         }
     }
 
     /// Push a request on the tail of the list.
-    pub fn push_tail(&mut self, rq: Owned<IdleRequest<T>>) {
+    pub fn push_tail(&mut self, rq: U) {
         let ptr = rq.as_raw();
         core::mem::forget(rq);
         // INVARIANT: rq is an `IdleRequest<T>`.
@@ -88,15 +104,24 @@ impl<T: Operations> RequestList<T> {
         // SAFETY: By type invariant, `self.inner` is a valid list.
         unsafe { bindings::rq_list_peek(self.inner.get()) }
     }
+
+    /// Returns a borrowing iterator over the requests in this list.
+    pub fn iter(&self) -> RequestListIter<'_, T, U> {
+        let request_list = self.inner.get();
+        RequestListIter {
+            request: unsafe { (*request_list).head },
+            _p: PhantomData,
+        }
+    }
 }
 
-impl<T: Operations> Default for RequestList<T> {
+impl<T: Operations, U: ConvertRaw> Default for RequestList<T, U> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<T: Operations> Drop for RequestList<T> {
+impl<T: Operations, U: ConvertRaw> Drop for RequestList<T, U> {
     fn drop(&mut self) {
         while let Some(rq) = self.pop() {
             drop(rq)
@@ -104,10 +129,28 @@ impl<T: Operations> Drop for RequestList<T> {
     }
 }
 
-impl<T: Operations> Iterator for &mut RequestList<T> {
-    type Item = Owned<IdleRequest<T>>;
+impl<T: Operations, U: ConvertRaw> Iterator for &mut RequestList<T, U> {
+    type Item = U;
 
     fn next(&mut self) -> Option<Self::Item> {
         self.pop()
+    }
+}
+
+pub struct RequestListIter<'a, T: Operations, U: ConvertRaw> {
+    request: *mut bindings::request,
+    _p: PhantomData<&'a (T, U)>
+}
+
+impl<'a, T: Operations> Iterator for RequestListIter<'a, T, ARef<Request<T>>> {
+    type Item = ARef<Request<T>>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.request.is_null() {
+            return None;
+        }
+        let ret_ptr = self.request;
+        self.request = unsafe { (*self.request).__bindgen_anon_1.rq_next };
+        Some(unsafe { Request::aref_from_raw(ret_ptr) })
     }
 }

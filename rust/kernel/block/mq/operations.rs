@@ -73,7 +73,7 @@ pub trait Operations: Sized {
     fn queue_rqs(
         _hw_data: ForeignBorrowed<'_, Self::HwData>,
         _queue_data: ForeignBorrowed<'_, Self::QueueData>,
-        _requests: &mut RequestList<Self>,
+        _requests: &mut RequestList<Self, Owned<IdleRequest<Self>>>,
     ) {
         build_error!(crate::error::VTABLE_DEFAULT_ERROR)
     }
@@ -272,7 +272,7 @@ impl<T: Operations> OperationsVTable<T> {
         // - By the safety requirements of this function, `requests` is valid for use as a
         // `RequestList`.
         // - We have exclusive access to `requests` for the duration of this function.
-        let requests = unsafe { RequestList::from_raw(requests) };
+        let requests = unsafe { RequestList::from_raw_mut(requests) };
 
         let rq_ptr = requests.peek_raw();
 
